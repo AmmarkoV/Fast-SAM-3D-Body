@@ -122,6 +122,40 @@ def step1_export_onnx(backbone, batch_sizes=[1, 2, 4]):
     wrapper = BackboneWrapper(backbone.encoder)
     wrapper.eval()
     wrapper.float()  # Convert to FP32
+
+    # Monkey-patch prepare_tokens_with_masks to skip the mask_token path.
+    # The original does `cls_token = self.cls_token + 0 * self.mask_token`
+    # even when masks=None, which causes a type-promotion bug in the
+    # Dynamo ONNX exporter. During inference, masks are never provided,
+    # so the mask_token is dead code.
+    _orig_prepare_tokens = wrapper.encoder.prepare_tokens_with_masks
+    def _prepare_tokens_no_mask(x):
+        x = _orig_prepare_tokens(x, masks=None)
+        return x
+    # Override to avoid the `0 * self.mask_token` graph edge entirely
+    import types
+    def _prepare_tokens_patched(self, x, masks=None):
+        x = self.patch_embed(x)
+        B, H, W, _ = x.shape
+        x = x.flatten(1, 2)
+        cls_token = self.cls_token
+        if self.n_storage_tokens > 0:
+            storage_tokens = self.storage_tokens
+        else:
+            storage_tokens = torch.empty(
+                1, 0, cls_token.shape[-1],
+                dtype=cls_token.dtype, device=cls_token.device,
+            )
+        x = torch.cat([
+            cls_token.expand(B, -1, -1),
+            storage_tokens.expand(B, -1, -1),
+            x,
+        ], dim=1)
+        return x, (H, W)
+    wrapper.encoder.prepare_tokens_with_masks = types.MethodType(
+        _prepare_tokens_patched, wrapper.encoder
+    )
+
     wrapper.cuda()
 
     # Test input (FP32)
@@ -148,7 +182,7 @@ def step1_export_onnx(backbone, batch_sizes=[1, 2, 4]):
         ONNX_PATH,
         input_names=["input"],
         output_names=["output"],
-        opset_version=17,
+        opset_version=18,
         do_constant_folding=True,
         dynamic_axes=dynamic_axes,
     )
@@ -156,14 +190,9 @@ def step1_export_onnx(backbone, batch_sizes=[1, 2, 4]):
     print(f"  [SUCCESS] Saved to: {ONNX_PATH}")
     print(f"  File size: {os.path.getsize(ONNX_PATH) / 1024 / 1024:.1f} MB")
 
-    # Verify ONNX
-    try:
-        import onnx
-        model = onnx.load(ONNX_PATH)
-        onnx.checker.check_model(model)
-        print("  ONNX model verified!")
-    except Exception as e:
-        print(f"  Warning: ONNX verification failed: {e}")
+   # Skip ONNX verification — loading the full model with external data
+    # into CPU RAM OOM-kills the process. TensorRT will validate it when parsing.
+    print("  ONNX model exported successfully (skipping verification).")
 
     return True
 
