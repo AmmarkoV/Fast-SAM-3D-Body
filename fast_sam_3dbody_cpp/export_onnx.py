@@ -140,15 +140,22 @@ class BodyDecoderWrapper(nn.Module):
         self,
         features:  torch.Tensor,   # [B, 1280, 32, 32]
         cond_info: torch.Tensor,   # [B, 3]
-        ray_cond:  torch.Tensor,   # [B, 2, 512, 512]
+        ray_cond:  torch.Tensor,   # [B, 2, 32, 32]  — already at patch resolution
     ) -> torch.Tensor:             # [B, 1024]
 
         B     = features.shape[0]
         dev   = features.device
         dtype = features.dtype
 
-        # ── apply ray conditioning ────────────────────────────────────────
-        features = self.ray_cond_emb(features, ray_cond)   # [B, 1280, 32, 32]
+        # ── CameraEncoder (inlined, without F.interpolate) ────────────────
+        # ray_cond is already at feature-map resolution [B, 2, H, W]
+        _h, _w = features.shape[2], features.shape[3]
+        rays = ray_cond.permute(0, 2, 3, 1)                         # [B, H, W, 2]
+        rays = torch.cat([rays, torch.ones_like(rays[..., :1])], -1) # [B, H, W, 3]
+        rays_emb = self.ray_cond_emb.camera(pos=rays.reshape(B, -1, 3))  # [B, H*W, 99]
+        rays_emb = rays_emb.reshape(B, _h, _w, -1).permute(0, 3, 1, 2).contiguous()
+        z = torch.cat([features, rays_emb], dim=1)
+        features = self.ray_cond_emb.norm(self.ray_cond_emb.conv(z))  # [B, 1280, H, W]
 
         # ── build initial estimate ────────────────────────────────────────
         init_pose   = self.init_pose.weight.expand(B, -1).unsqueeze(1)    # [B,1,P]
@@ -273,9 +280,9 @@ def export_backbone(model, out_dir: str, opset: int = 18):
         input_names=["image"],
         output_names=["features"],
         dynamic_axes={"image": {0: "B"}, "features": {0: "B"}},
-        dynamic_shapes={"image": {0: "B"}, "features": {0: "B"}},
         opset_version=opset,
         do_constant_folding=True,
+        dynamo=False,
     )
     print(f"   {os.path.getsize(path)/1e6:.1f} MB  ✓")
     _simplify(path)
@@ -291,20 +298,24 @@ def export_decoder(model, out_dir: str, opset: int = 18):
     B = 1
     feat  = torch.randn(B, BACKBONE_DIM, FEAT_H, FEAT_W, device="cuda")
     cond  = torch.randn(B, 3,            device="cuda")
-    ray   = torch.randn(B, 2, IMAGE_SIZE, IMAGE_SIZE, device="cuda")
+    ray   = torch.randn(B, 2, FEAT_H,   FEAT_W,  device="cuda")  # patch-res rays
 
     with torch.no_grad():
         token = wrapper(feat, cond, ray)
     print(f"   pose_token shape: {tuple(token.shape)}")
 
-    scripted = torch.jit.script(wrapper)
     torch.onnx.export(
-        scripted,
-        traced,
+        wrapper,
         (feat, cond, ray),
         path,
         input_names =["features", "condition_info", "ray_cond"],
         output_names=["pose_token"],
+        dynamic_axes={
+            "features":       {0: "B"},
+            "condition_info": {0: "B"},
+            "ray_cond":       {0: "B"},
+            "pose_token":     {0: "B"},
+        },
         opset_version=opset,
         do_constant_folding=True,
         dynamo=False,
@@ -324,29 +335,32 @@ def export_body_model(model, out_dir: str, opset: int = 18):
     B = 1
     shape  = torch.randn(B, 45,  device="cuda")
     bparams= torch.randn(B, 204, device="cuda")
-    face   = torch.zeros(B, 72,  device="cuda")   # face usually zeroed
+    face   = torch.zeros(B, 72,  device="cuda")
 
     with torch.no_grad():
         verts, skel = wrapper(shape, bparams, face)
     print(f"   verts {tuple(verts.shape)}  skel {tuple(skel.shape)}")
 
+    # Script the wrapper so the torch.jit.ScriptModule submodule is reachable
+    scripted = torch.jit.script(wrapper)
+
     dyn = {
-            "shape":       {0: "B"},
-            "body_params": {0: "B"},
-            "face":        {0: "B"},
-            "vertices":    {0: "B"},
-            "skeleton":    {0: "B"},
-        }
+        "shape":       {0: "B"},
+        "body_params": {0: "B"},
+        "face":        {0: "B"},
+        "vertices":    {0: "B"},
+        "skeleton":    {0: "B"},
+    }
     torch.onnx.export(
-        wrapper,
+        scripted,
         (shape, bparams, face),
         path,
         input_names =["shape", "body_params", "face"],
         output_names=["vertices", "skeleton"],
         dynamic_axes=dyn,
-        dynamic_shapes=dyn,
         opset_version=opset,
         do_constant_folding=True,
+        dynamo=False,
     )
     print(f"   {os.path.getsize(path)/1e6:.1f} MB  ✓")
     _simplify(path)

@@ -14,6 +14,8 @@ namespace fsb {
 static constexpr float IMAGE_MEAN[3] = {0.485f, 0.456f, 0.406f};
 static constexpr float IMAGE_STD[3]  = {0.229f, 0.224f, 0.225f};
 static constexpr int   CROP_SIZE     = 512;
+static constexpr int   FEAT_HW      = CROP_SIZE / 16;  // 32 – patch grid size
+static constexpr int   PATCH_SIZE   = 16;
 
 // ─── Crop one person out of a BGR image and return normalised CHW float32 ─────
 //
@@ -113,37 +115,41 @@ inline void compute_condition_info(
     cond[2] = bbox_size          / focal_x;
 }
 
-// ─── Compute ray_cond map  [2, H, W]  (full image resolution) ────────────────
+// ─── Compute ray_cond map  [2, FEAT_HW, FEAT_HW]  at patch resolution ────────
 //
-// For each pixel (px, py) in the 512×512 crop, compute the back-projected
-// normalised ray direction in camera coords:
+// The ONNX decoder expects ray directions at feature-map resolution (32×32),
+// so we sample at each patch centre instead of per-pixel.
 //
-//   orig_x(px) = (px - CROP_SIZE/2) / scale + bbox_cx
-//   orig_y(py) = (py - CROP_SIZE/2) / scale + bbox_cy
-//   ray_x(px,py) = (orig_x - cam_cx) / focal_x
-//   ray_y(px,py) = (orig_y - cam_cy) / focal_y
+// Patch centre (px, py) in the 512×512 crop:
+//   crop_x = px * PATCH_SIZE + PATCH_SIZE/2
+//   crop_y = py * PATCH_SIZE + PATCH_SIZE/2
 //
-// where  scale = CROP_SIZE / crop_size_orig
+// Back-projected to original image then to normalised camera ray:
+//   orig_x = (crop_x - CROP_SIZE/2) / scale + bbox_cx
+//   ray_x  = (orig_x - cam_cx) / focal_x
 //
-// out_ray: float[2 × CROP_SIZE × CROP_SIZE]  layout [channel, y, x]
+// out_ray: float[2 × FEAT_HW × FEAT_HW]  layout [channel, y, x]
 // channel 0 = ray_x,  channel 1 = ray_y
 inline void compute_ray_cond(
     float bbox_cx, float bbox_cy, float crop_size_orig,
     float focal_x, float focal_y,
     float cam_cx,  float cam_cy,
-    float* out_ray   // [2, CROP_SIZE, CROP_SIZE]
+    float* out_ray   // [2, FEAT_HW, FEAT_HW]
 )
 {
     const float scale   = static_cast<float>(CROP_SIZE) / crop_size_orig;
     const float half_cs = CROP_SIZE * 0.5f;
-    const int plane     = CROP_SIZE * CROP_SIZE;
+    const int   FHW     = FEAT_HW;
+    const int   plane   = FHW * FHW;
 
-    for (int y = 0; y < CROP_SIZE; ++y) {
-        for (int x = 0; x < CROP_SIZE; ++x) {
-            float orig_x = (x - half_cs) / scale + bbox_cx;
-            float orig_y = (y - half_cs) / scale + bbox_cy;
-            out_ray[0 * plane + y * CROP_SIZE + x] = (orig_x - cam_cx) / focal_x;
-            out_ray[1 * plane + y * CROP_SIZE + x] = (orig_y - cam_cy) / focal_y;
+    for (int py = 0; py < FHW; ++py) {
+        for (int px = 0; px < FHW; ++px) {
+            float crop_x = px * PATCH_SIZE + PATCH_SIZE * 0.5f;
+            float crop_y = py * PATCH_SIZE + PATCH_SIZE * 0.5f;
+            float orig_x = (crop_x - half_cs) / scale + bbox_cx;
+            float orig_y = (crop_y - half_cs) / scale + bbox_cy;
+            out_ray[0 * plane + py * FHW + px] = (orig_x - cam_cx) / focal_x;
+            out_ray[1 * plane + py * FHW + px] = (orig_y - cam_cy) / focal_y;
         }
     }
 }

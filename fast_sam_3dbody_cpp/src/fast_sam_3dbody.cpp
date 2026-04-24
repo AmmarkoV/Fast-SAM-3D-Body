@@ -505,9 +505,10 @@ struct Pipeline::Impl {
         const int plane = CROP_SIZE * CROP_SIZE;
 
         // Pre-allocate batch buffers
+        const int ray_plane = FEAT_HW * FEAT_HW;
         std::vector<float> batch_crops   (B * 3 * plane);
         std::vector<float> batch_cond    (B * 3);
-        std::vector<float> batch_ray     (B * 2 * plane);
+        std::vector<float> batch_ray     (B * 2 * ray_plane);
         std::vector<float> crop_cx_v(B), crop_cy_v(B), crop_sz_v(B);
 
         t0 = Clock::now();
@@ -524,7 +525,7 @@ struct Pipeline::Impl {
             float* cond_ptr = batch_cond.data() + i * 3;
             compute_condition_info(ccx, ccy, csz, fx, fy, cx, cy, cond_ptr);
 
-            float* ray_ptr = batch_ray.data() + i * 2 * plane;
+            float* ray_ptr = batch_ray.data() + i * 2 * ray_plane;
             compute_ray_cond(ccx, ccy, csz, fx, fy, cx, cy, ray_ptr);
         }
         printf("[FSB] preprocess: %.1f ms\n", ms(t0));
@@ -555,7 +556,7 @@ struct Pipeline::Impl {
 
         std::vector<int64_t> feat_shape{B, BACKBONE_DIM, FEAT_HW, FEAT_HW};
         std::vector<int64_t> cond_shape{B, 3};
-        std::vector<int64_t> ray_shape {B, 2, CROP_SIZE, CROP_SIZE};
+        std::vector<int64_t> ray_shape {B, 2, FEAT_HW, FEAT_HW};
 
         Ort::Value feat_t = Ort::Value::CreateTensor<float>(
             mi, features.data(), features.size(), feat_shape.data(), 4);
