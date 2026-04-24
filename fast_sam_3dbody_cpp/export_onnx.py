@@ -128,6 +128,13 @@ class BodyDecoderWrapper(nn.Module):
 
         # Disable intermediate predictions so the decoder returns plain tensors
         self.decoder.do_interm_preds = False
+        # Disable keypoint token update — not needed for ONNX export
+        self.decoder.keypoint_token_update = None
+
+        # Replace GELU with ReLU to work around torch.export bug with gelu → convert_to_relu
+        for m in self.modules():
+            if isinstance(m, nn.GELU):
+                m.approximate = "tanh"  # use tanh approximation which exports cleanly
 
     def forward(
         self,
@@ -232,7 +239,12 @@ def _simplify(path: str):
         import onnxsim
         import onnx
         model = onnx.load(path)
-        model_sim, ok = onnxsim.simplify(model)
+        try:
+            model_sim, ok = onnxsim.simplify(model)
+        except RuntimeError:
+            # onnxsim C extension bug with ir_version — skip
+            print(f"  [onnxsim] C simplify skipped for {os.path.basename(path)}")
+            return
         if ok:
             onnx.save(model_sim, path)
             print(f"  [onnxsim] simplified {os.path.basename(path)}")
@@ -261,6 +273,7 @@ def export_backbone(model, out_dir: str, opset: int = 18):
         input_names=["image"],
         output_names=["features"],
         dynamic_axes={"image": {0: "B"}, "features": {0: "B"}},
+        dynamic_shapes={"image": {0: "B"}, "features": {0: "B"}},
         opset_version=opset,
         do_constant_folding=True,
     )
@@ -284,20 +297,17 @@ def export_decoder(model, out_dir: str, opset: int = 18):
         token = wrapper(feat, cond, ray)
     print(f"   pose_token shape: {tuple(token.shape)}")
 
+    scripted = torch.jit.script(wrapper)
     torch.onnx.export(
-        wrapper,
+        scripted,
+        traced,
         (feat, cond, ray),
         path,
         input_names =["features", "condition_info", "ray_cond"],
         output_names=["pose_token"],
-        dynamic_axes={
-            "features":       {0: "B"},
-            "condition_info": {0: "B"},
-            "ray_cond":       {0: "B"},
-            "pose_token":     {0: "B"},
-        },
         opset_version=opset,
         do_constant_folding=True,
+        dynamo=False,
     )
     print(f"   {os.path.getsize(path)/1e6:.1f} MB  ✓")
     _simplify(path)
@@ -320,19 +330,21 @@ def export_body_model(model, out_dir: str, opset: int = 18):
         verts, skel = wrapper(shape, bparams, face)
     print(f"   verts {tuple(verts.shape)}  skel {tuple(skel.shape)}")
 
+    dyn = {
+            "shape":       {0: "B"},
+            "body_params": {0: "B"},
+            "face":        {0: "B"},
+            "vertices":    {0: "B"},
+            "skeleton":    {0: "B"},
+        }
     torch.onnx.export(
         wrapper,
         (shape, bparams, face),
         path,
         input_names =["shape", "body_params", "face"],
         output_names=["vertices", "skeleton"],
-        dynamic_axes={
-            "shape":       {0: "B"},
-            "body_params": {0: "B"},
-            "face":        {0: "B"},
-            "vertices":    {0: "B"},
-            "skeleton":    {0: "B"},
-        },
+        dynamic_axes=dyn,
+        dynamic_shapes=dyn,
         opset_version=opset,
         do_constant_folding=True,
     )
