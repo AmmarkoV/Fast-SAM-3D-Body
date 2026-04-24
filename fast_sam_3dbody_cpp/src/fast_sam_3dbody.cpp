@@ -47,6 +47,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <fstream>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -82,132 +83,106 @@ struct GGUFMeta {
 static uint32_t gguf_u32(gguf_context* c, const char* k, uint32_t def=0) {
     int id = gguf_find_key(c, k); return id>=0 ? gguf_get_val_u32(c, id) : def;
 }
-static float gguf_f32(gguf_context* c, const char* k, float def=0.f) {
-    int id = gguf_find_key(c, k); return id>=0 ? gguf_get_val_f32(c, id) : def;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Small FFN  (MHR head / camera head)  running on ggml
+// Small FFN  (MHR head / camera head)  – plain C++ CPU matmul
 //
 // Architecture: Linear(in, hid) + ReLU + Linear(hid, out)
-// Weights stored in GGUF as:
-//   {prefix}.fc0.{weight,bias}   –  [hid, in] / [hid]
-//   {prefix}.fc1.{weight,bias}   –  [out, hid] / [out]
+// Weights loaded from GGUF (f16 weights converted to f32 on load).
+//   {prefix}.fc0.{weight,bias}   –  shape [hid, in] / [hid]
+//   {prefix}.fc1.{weight,bias}   –  shape [out, hid] / [out]
+//
+// Row-major storage: w0[i * in_dim + j] = weight from input j to hidden i.
+// Inference: y = relu(x @ w0.T + b0) @ w1.T + b1
 // ─────────────────────────────────────────────────────────────────────────────
-struct FFNGraph {
-    ggml_backend_t        backend    = nullptr;
-    ggml_backend_buffer_t weight_buf = nullptr;
-    ggml_context*         wctx       = nullptr;
-    ggml_context*         cctx       = nullptr;
-    ggml_cgraph*          graph      = nullptr;
-    ggml_gallocr_t        alloc      = nullptr;
-    ggml_tensor*          input      = nullptr;  // [batch, in_dim]
-    ggml_tensor*          output     = nullptr;  // [batch, out_dim]
-    // weight pointers (loaded into wctx/weight_buf)
-    ggml_tensor *w0=nullptr, *b0=nullptr, *w1=nullptr, *b1=nullptr;
+struct CFFN {
+    std::vector<float> w0, b0, w1, b1;
     int in_dim=0, hid_dim=0, out_dim=0;
-    int batch=1;
 };
 
-static bool ffn_load_weights(FFNGraph& ffn,
-                              ggml_context* wctx,
-                              gguf_context* gctx,
-                              FILE*         fp,
-                              size_t        data_base,
-                              const std::string& prefix)
+static bool cffn_load(CFFN& ffn,
+                      gguf_context*  gctx,
+                      ggml_context*  wctx,   // created by gguf_init_from_file
+                      FILE*          fp,
+                      size_t         data_base,
+                      const std::string& prefix)
 {
-    auto get = [&](const char* suffix) -> ggml_tensor* {
+    // Read one weight tensor by name; convert f16→f32 if needed.
+    // Shape comes from the ggml context created alongside the gguf context.
+    auto read_f32 = [&](const char* suffix, std::vector<float>& out) -> bool
+    {
         std::string name = prefix + suffix;
+
+        // Get shape from the ggml context
         ggml_tensor* t = ggml_get_tensor(wctx, name.c_str());
         if (!t) {
-            fprintf(stderr, "[FFN] missing tensor: %s\n", name.c_str());
-            return nullptr;
+            fprintf(stderr, "[FFN] tensor not found: %s\n", name.c_str());
+            return false;
         }
-        int idx = gguf_find_tensor(gctx, name.c_str());
-        size_t off = gguf_get_tensor_offset(gctx, idx);
+        size_t n    = ggml_nelements(t);
+        int64_t idx = gguf_find_tensor(gctx, name.c_str());
+        size_t  off = gguf_get_tensor_offset(gctx, idx);
+        int     type = (int)gguf_get_tensor_type(gctx, idx);
+
         std::fseek(fp, (long)(data_base + off), SEEK_SET);
-        std::vector<uint8_t> buf(ggml_nbytes(t));
-        if (std::fread(buf.data(), 1, buf.size(), fp) != buf.size()) return nullptr;
-        ggml_backend_tensor_set(t, buf.data(), 0, buf.size());
-        return t;
+        out.resize(n);
+        if (type == GGML_TYPE_F32) {
+            if (std::fread(out.data(), sizeof(float), n, fp) != n) return false;
+        } else if (type == GGML_TYPE_F16) {
+            std::vector<uint16_t> tmp(n);
+            if (std::fread(tmp.data(), sizeof(uint16_t), n, fp) != n) return false;
+            ggml_fp16_to_fp32_row(tmp.data(), out.data(), (int)n);
+        } else {
+            fprintf(stderr, "[FFN] unsupported weight type %d for %s\n", type, name.c_str());
+            return false;
+        }
+        return true;
     };
 
-    ffn.w0 = get(".fc0.weight");
-    ffn.b0 = get(".fc0.bias");
-    ffn.w1 = get(".fc1.weight");
-    ffn.b1 = get(".fc1.bias");
-    return ffn.w0 && ffn.b0 && ffn.w1 && ffn.b1;
-}
+    // Retrieve dimension info from ggml context tensors
+    auto get_tensor = [&](const char* suffix) -> ggml_tensor* {
+        return ggml_get_tensor(wctx, (prefix + suffix).c_str());
+    };
 
-static bool ffn_build_graph(FFNGraph& ffn, int batch) {
-    if (ffn.cctx) { ggml_free(ffn.cctx); ffn.graph=nullptr; }
-    if (ffn.alloc) { ggml_gallocr_free(ffn.alloc); ffn.alloc=nullptr; }
-    ffn.batch = batch;
+    if (!read_f32(".fc0.weight", ffn.w0)) return false;
+    if (!read_f32(".fc0.bias",   ffn.b0)) return false;
+    if (!read_f32(".fc1.weight", ffn.w1)) return false;
+    if (!read_f32(".fc1.bias",   ffn.b1)) return false;
 
-    // w0: [hid, in]  →  in_dim = ne[0], hid_dim = ne[1]
-    ffn.in_dim  = (int)ffn.w0->ne[0];
-    ffn.hid_dim = (int)ffn.w0->ne[1];
-    ffn.out_dim = (int)ffn.w1->ne[1];
-
-    struct ggml_init_params cp{ 256*1024, nullptr, true };
-    ffn.cctx = ggml_init(cp);
-    if (!ffn.cctx) return false;
-
-    // input [in_dim, batch]
-    ffn.input = ggml_new_tensor_2d(ffn.cctx, GGML_TYPE_F32, ffn.in_dim, batch);
-    ggml_set_name(ffn.input, "input");
-
-    // Layer 0: x = relu(W0^T x + b0)
-    auto b0 = ggml_reshape_2d(ffn.cctx, ffn.b0, ffn.b0->ne[0], 1);
-    auto h  = ggml_add(ffn.cctx,
-                  ggml_mul_mat(ffn.cctx, ffn.w0, ffn.input),
-                  ggml_repeat(ffn.cctx, b0,
-                              ggml_new_tensor_2d(ffn.cctx, GGML_TYPE_F32, ffn.hid_dim, batch)));
-    h = ggml_relu(ffn.cctx, h);
-
-    // Layer 1: out = W1^T h + b1
-    auto b1 = ggml_reshape_2d(ffn.cctx, ffn.b1, ffn.b1->ne[0], 1);
-    auto out = ggml_add(ffn.cctx,
-                   ggml_mul_mat(ffn.cctx, ffn.w1, h),
-                   ggml_repeat(ffn.cctx, b1,
-                               ggml_new_tensor_2d(ffn.cctx, GGML_TYPE_F32, ffn.out_dim, batch)));
-    ffn.output = out;
-    ggml_set_name(ffn.output, "output");
-
-    ffn.graph = ggml_new_graph_custom(ffn.cctx, 128, false);
-    ggml_build_forward_expand(ffn.graph, ffn.output);
-
-    ffn.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ffn.backend));
-    if (!ggml_gallocr_alloc_graph(ffn.alloc, ffn.graph)) {
-        fprintf(stderr, "[FFN] gallocr_alloc_graph failed\n");
-        return false;
-    }
+    // ne[0]=Cin, ne[1]=Cout for weight matrices (GGML column-major vs numpy row-major)
+    auto* w0t = get_tensor(".fc0.weight");
+    auto* w1t = get_tensor(".fc1.weight");
+    ffn.in_dim  = (int)w0t->ne[0];
+    ffn.hid_dim = (int)w0t->ne[1];
+    ffn.out_dim = (int)w1t->ne[1];
     return true;
 }
 
-static std::vector<float> ffn_run(FFNGraph& ffn,
-                                   const float* x,
-                                   int batch,
-                                   bool rebuild_if_needed = true)
+// y = relu(x @ w.T + b)   x:[B,K]  w:[N,K]  b:[N]  → out:[B,N]
+static void linear_relu(const float* x, const float* w, const float* b,
+                        float* y, int B, int K, int N, bool relu)
 {
-    if (rebuild_if_needed && batch != ffn.batch)
-        ffn_build_graph(ffn, batch);
-
-    ggml_backend_tensor_set(ffn.input, x, 0,
-                            (size_t)ffn.in_dim * batch * sizeof(float));
-    ggml_backend_graph_compute(ffn.backend, ffn.graph);
-
-    std::vector<float> out((size_t)ffn.out_dim * batch);
-    ggml_backend_tensor_get(ffn.output, out.data(), 0, out.size() * sizeof(float));
-    return out;
+    for (int bi = 0; bi < B; ++bi) {
+        for (int n = 0; n < N; ++n) {
+            float s = b[n];
+            const float* xr = x + bi * K;
+            const float* wr = w + n * K;
+            for (int k = 0; k < K; ++k) s += xr[k] * wr[k];
+            y[bi * N + n] = relu ? std::max(0.f, s) : s;
+        }
+    }
 }
 
-static void ffn_free(FFNGraph& ffn) {
-    if (ffn.alloc)      { ggml_gallocr_free(ffn.alloc);            ffn.alloc=nullptr; }
-    if (ffn.cctx)       { ggml_free(ffn.cctx);                     ffn.cctx=nullptr; }
-    if (ffn.weight_buf) { ggml_backend_buffer_free(ffn.weight_buf); ffn.weight_buf=nullptr; }
-    if (ffn.wctx)       { ggml_free(ffn.wctx);                     ffn.wctx=nullptr; }
-    if (ffn.backend)    { ggml_backend_free(ffn.backend);           ffn.backend=nullptr; }
+static std::vector<float> cffn_run(const CFFN& ffn, const float* x, int B)
+{
+    std::vector<float> h(B * ffn.hid_dim);
+    linear_relu(x,       ffn.w0.data(), ffn.b0.data(),
+                h.data(), B, ffn.in_dim,  ffn.hid_dim, true);
+
+    std::vector<float> y(B * ffn.out_dim);
+    linear_relu(h.data(), ffn.w1.data(), ffn.b1.data(),
+                y.data(),  B, ffn.hid_dim, ffn.out_dim, false);
+    return y;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -299,11 +274,8 @@ struct Pipeline::Impl {
     Ort::Env        ort_env{ORT_LOGGING_LEVEL_WARNING, "fast_sam_3dbody"};
     OrtSession      sess_yolo, sess_backbone, sess_decoder, sess_body;
 
-    // ggml for MHR + camera heads
-    ggml_backend_t        ggml_backend    = nullptr;
-    ggml_backend_buffer_t ggml_weight_buf = nullptr;
-    ggml_context*         ggml_wctx       = nullptr;
-    FFNGraph              mhr_ffn, cam_ffn;
+    // CPU FFNs for MHR + camera heads (weights loaded from GGUF)
+    CFFN mhr_ffn, cam_ffn;
 
     // ── load ──────────────────────────────────────────────────────────────────
     bool load(const PipelineConfig& c) {
@@ -330,11 +302,21 @@ struct Pipeline::Impl {
         printf("OK\n");
 
         if (!cfg.skip_body_model) {
-            printf("[FSB] Loading body_model … "); fflush(stdout);
-            if (!sess_body.load(ort_env, opath("body_model.onnx"), cuda, dev,
-                                false, false))
-                return false;
-            printf("OK\n");
+            // Prefer body_model.onnx; fall back gracefully to body_model.pt
+            // (body_model.pt requires LibTorch – planned via ggml, see TODO below)
+            std::string bm_onnx = opath("body_model.onnx");
+            std::ifstream bm_check(bm_onnx);
+            if (bm_check.good()) {
+                bm_check.close();
+                printf("[FSB] Loading body_model.onnx … "); fflush(stdout);
+                if (!sess_body.load(ort_env, bm_onnx, cuda, dev, false, false))
+                    return false;
+                printf("OK\n");
+            } else {
+                printf("[FSB] body_model.onnx not found; vertex output disabled.\n");
+                printf("[FSB] (body_model.pt exists – ggml implementation planned)\n");
+                // Not a fatal error: vertices / keypoints will be empty in MHRResult
+            }
         }
 
         // YOLO – optional (might not exist for image-only usage)
@@ -357,20 +339,10 @@ struct Pipeline::Impl {
     }
 
     bool load_gguf(const std::string& path) {
-#if defined(GGML_USE_CUDA)
-        if (cfg.cuda_device >= 0) {
-            ggml_backend = ggml_backend_cuda_init(cfg.cuda_device);
-            if (ggml_backend)
-                printf("[FSB] ggml CUDA backend (device %d)\n", cfg.cuda_device);
-        }
-#endif
-        if (!ggml_backend) {
-            ggml_backend = ggml_backend_cpu_init();
-            printf("[FSB] ggml CPU backend\n");
-        }
-
+        // Only use gguf for metadata + weight bytes; inference runs in plain C++.
         gguf_context* gctx = nullptr;
-        { struct gguf_init_params p{true, &ggml_wctx}; gctx = gguf_init_from_file(path.c_str(), p); }
+        ggml_context* tmp_ctx = nullptr;
+        { struct gguf_init_params p{true, &tmp_ctx}; gctx = gguf_init_from_file(path.c_str(), p); }
         if (!gctx) { fprintf(stderr, "[FSB] Cannot open GGUF: %s\n", path.c_str()); return false; }
 
         meta.decoder_dim   = gguf_u32(gctx, "sam3dbody.decoder_dim", 1024);
@@ -379,35 +351,19 @@ struct Pipeline::Impl {
         meta.person_thresh = cfg.person_thresh;
         meta.nms_iou       = cfg.person_nms_iou;
 
-        ggml_weight_buf = ggml_backend_alloc_ctx_tensors(ggml_wctx, ggml_backend);
-        if (!ggml_weight_buf) {
-            fprintf(stderr, "[FSB] ggml weight buffer allocation failed\n");
-            gguf_free(gctx);
-            return false;
-        }
-
         FILE* fp = std::fopen(path.c_str(), "rb");
-        if (!fp) { gguf_free(gctx); return false; }
+        if (!fp) { gguf_free(gctx); if (tmp_ctx) ggml_free(tmp_ctx); return false; }
         size_t data_base = gguf_get_data_offset(gctx);
 
-        // Set up shared backend for both FFNs
-        mhr_ffn.backend = ggml_backend;
-        cam_ffn.backend = ggml_backend;
-        mhr_ffn.wctx = ggml_wctx;
-        cam_ffn.wctx = ggml_wctx;
-
-        bool ok = ffn_load_weights(mhr_ffn, ggml_wctx, gctx, fp, data_base, "mhr_proj")
-               && ffn_load_weights(cam_ffn, ggml_wctx, gctx, fp, data_base, "cam_proj");
+        bool ok = cffn_load(mhr_ffn, gctx, tmp_ctx, fp, data_base, "mhr_proj")
+               && cffn_load(cam_ffn, gctx, tmp_ctx, fp, data_base, "cam_proj");
 
         std::fclose(fp);
         gguf_free(gctx);
+        if (tmp_ctx) ggml_free(tmp_ctx);
         if (!ok) return false;
 
-        // Build computation graphs for batch=1
-        if (!ffn_build_graph(mhr_ffn, 1)) return false;
-        if (!ffn_build_graph(cam_ffn, 1)) return false;
-
-        printf("[FSB] ggml FFNs: MHR(%dx%d→%d) Cam(%dx%d→%d)\n",
+        printf("[FSB] FFNs: MHR(%dx%d->%d) Cam(%dx%d->%d)\n",
                mhr_ffn.in_dim, mhr_ffn.hid_dim, mhr_ffn.out_dim,
                cam_ffn.in_dim, cam_ffn.hid_dim, cam_ffn.out_dim);
         return true;
@@ -481,9 +437,9 @@ struct Pipeline::Impl {
                         row_major.assign(raw, raw + nd * 56);
                     }
                 }
-                // de-normalise from YOLO 640×640 back to original
+                // scale from YOLO 640×640 space to original image space
                 float sx = float(W) / YW, sy = float(H) / YH;
-                dets = parse_yolo_output(row_major.data(), nd, W, H,
+                dets = parse_yolo_output(row_major.data(), nd,
                                          cfg.person_thresh, cfg.person_nms_iou);
                 for (auto& d : dets) {
                     d.x1 *= sx; d.x2 *= sx;
@@ -581,10 +537,10 @@ struct Pipeline::Impl {
         std::vector<float> pose_tokens(token_ptr, token_ptr + token_elems);
         printf("[FSB] decoder:    %.1f ms\n", ms(t0));
 
-        // ── MHR head (ggml) ───────────────────────────────────────────────────
+        // ── MHR head (CPU FFN) ────────────────────────────────────────────────
         t0 = Clock::now();
-        std::vector<float> mhr_raw  = ffn_run(mhr_ffn, pose_tokens.data(), B);
-        std::vector<float> cam_raw  = ffn_run(cam_ffn, pose_tokens.data(), B);
+        std::vector<float> mhr_raw  = cffn_run(mhr_ffn, pose_tokens.data(), B);
+        std::vector<float> cam_raw  = cffn_run(cam_ffn, pose_tokens.data(), B);
         printf("[FSB] MHR FFN:    %.1f ms\n", ms(t0));
 
         // ── body model (optional) ─────────────────────────────────────────────
@@ -714,12 +670,9 @@ struct Pipeline::Impl {
     }
 
     void free_all() {
-        ffn_free(mhr_ffn);
-        ffn_free(cam_ffn);
-        // Note: mhr_ffn and cam_ffn share backend/wctx – free only once
-        if (ggml_weight_buf) { ggml_backend_buffer_free(ggml_weight_buf); ggml_weight_buf=nullptr; }
-        if (ggml_wctx)       { ggml_free(ggml_wctx);                      ggml_wctx=nullptr;       }
-        if (ggml_backend)    { ggml_backend_free(ggml_backend);            ggml_backend=nullptr;    }
+        // CFFN weights are plain vectors – cleaned up automatically
+        mhr_ffn = CFFN{};
+        cam_ffn = CFFN{};
         sess_backbone.free();
         sess_decoder.free();
         sess_body.free();

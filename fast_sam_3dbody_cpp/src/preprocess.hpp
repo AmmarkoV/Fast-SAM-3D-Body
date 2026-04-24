@@ -59,8 +59,6 @@ inline void crop_and_normalise(
     // Clip and compute padding
     int pad_l = std::max(0, -x1);
     int pad_t = std::max(0, -y1);
-    int pad_r = std::max(0, x2 - img_w);
-    int pad_b = std::max(0, y2 - img_h);
 
     int sx1 = std::max(0, x1), sy1 = std::max(0, y1);
     int sx2 = std::min(img_w, x2), sy2 = std::min(img_h, y2);
@@ -178,12 +176,11 @@ static inline float iou(const PersonDet& a, const PersonDet& b) {
 }
 
 // Parse YOLO Pose output tensor [num_dets, 56] (already transposed to row-major).
-// img_w, img_h: original image dimensions for coordinate de-normalisation.
+// Ultralytics ONNX export outputs cx,cy,w,h in YOLO input pixel coords (0-640).
+// Caller scales to original image space via sx/sy after this call.
 inline std::vector<PersonDet> parse_yolo_output(
     const float*  data,          // [num_dets × 56]
     int           num_dets,
-    int           img_w,
-    int           img_h,
     float         conf_thresh,
     float         nms_iou_thresh
 )
@@ -197,10 +194,10 @@ inline std::vector<PersonDet> parse_yolo_output(
         float conf = row[4];
         if (conf < conf_thresh) continue;
         PersonDet d;
-        d.x1   = (cx - w * 0.5f) * img_w;
-        d.y1   = (cy - h * 0.5f) * img_h;
-        d.x2   = (cx + w * 0.5f) * img_w;
-        d.y2   = (cy + h * 0.5f) * img_h;
+        d.x1   = cx - w * 0.5f;   // YOLO pixel space (0-640)
+        d.y1   = cy - h * 0.5f;
+        d.x2   = cx + w * 0.5f;
+        d.y2   = cy + h * 0.5f;
         d.conf = conf;
         raw.push_back(d);
     }

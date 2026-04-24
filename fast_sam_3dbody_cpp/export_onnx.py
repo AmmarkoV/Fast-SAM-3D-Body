@@ -325,44 +325,33 @@ def export_decoder(model, out_dir: str, opset: int = 18):
 
 
 def export_body_model(model, out_dir: str, opset: int = 18):
-    path = os.path.join(out_dir, "body_model.onnx")
-    print(f"\n── body_model → {path}")
+    """
+    Save the MHR body model (mhr_model.pt) as a TorchScript file.
 
-    # mhr_jit is a torch.jit.ScriptModule – export it directly.
-    # apply_correctives is passed as a bool tensor constant (always False).
-    mhr_jit = model.head_pose.mhr
-    mhr_jit.eval().cuda()
+    The pymomentum LinearBlendSkinning ops inside MHRDemo are incompatible with
+    the ONNX TorchScript exporter (causes heap corruption).  We therefore save
+    the model as a TorchScript .pt file; the C++ side loads it with LibTorch
+    (torch::jit::load) rather than ONNX Runtime.
 
-    B = 1
-    shape   = torch.randn(B, 45,  device="cuda")
-    bparams = torch.randn(B, 204, device="cuda")
-    face    = torch.zeros(B, 72,  device="cuda")
-    corr    = torch.tensor(False, device="cuda")  # apply_correctives=False constant
+    If you do not need per-vertex output (vertices / keypoints), pass
+    --skip-body to the C++ executable and skip this step entirely.
+    """
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "checkpoints", "sam-3d-body-dinov3", "assets", "mhr_model.pt")
+    dst = os.path.join(out_dir, "body_model.pt")
 
-    with torch.no_grad():
-        verts, skel = mhr_jit(shape, bparams, face, False)
-    print(f"   verts {tuple(verts.shape)}  skel {tuple(skel.shape)}")
+    print(f"\n── body_model (TorchScript) → {dst}")
 
-    dyn = {
-        "shape":       {0: "B"},
-        "body_params": {0: "B"},
-        "face":        {0: "B"},
-        "vertices":    {0: "B"},
-        "skeleton":    {0: "B"},
-    }
-    torch.onnx.export(
-        mhr_jit,
-        (shape, bparams, face, corr),
-        path,
-        input_names =["shape", "body_params", "face", "apply_correctives"],
-        output_names=["vertices", "skeleton"],
-        dynamic_axes=dyn,
-        opset_version=opset,
-        do_constant_folding=True,
-        dynamo=False,
-    )
-    print(f"   {os.path.getsize(path)/1e6:.1f} MB  ✓")
-    _simplify(path)
+    if not os.path.exists(src):
+        print(f"   WARNING: {src} not found – skipping body model")
+        return
+
+    import shutil
+    shutil.copy2(src, dst)
+    size_mb = os.path.getsize(dst) / 1e6
+    print(f"   {size_mb:.1f} MB  ✓  (copied from checkpoint)")
+    print("   NOTE: loaded in C++ via torch::jit::load(), not ONNX Runtime.")
+    print("         Use --skip-body if you only need MHR pose parameters.")
 
 
 # ══════════════════════════════════════════════════════════════════════════

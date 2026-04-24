@@ -131,10 +131,10 @@ def main():
         ("Export YOLO detector (yolo.onnx)", "yolo" not in args.skip, export_yolo, []),
     ]
 
-    for name, should_run, fn, args_ in steps:
+    for idx, (name, should_run, fn, args_) in enumerate(steps, 1):
         print(f"\n{'=' * 60}")
         if should_run:
-            print(f"[  1/3  ] {name} ...")
+            print(f"[  {idx}/{len(steps)}  ] {name} ...")
             fn(*args_)
         else:
             print(f"[  skip  ] {name}")
@@ -142,18 +142,26 @@ def main():
     # Summary
     print(f"\n{'=' * 60}")
     print("Model summary:")
-    expected = ["backbone.onnx", "decoder.onnx", "body_model.onnx", "pipeline.gguf", "yolo.onnx"]
-    for fname in expected:
+    expected = [
+        ("backbone.onnx",   "required"),
+        ("decoder.onnx",    "required"),
+        ("pipeline.gguf",   "required"),
+        ("yolo.onnx",       "required"),
+        ("body_model.pt",   "optional – ggml impl planned"),
+    ]
+    for fname, note in expected:
         fpath = os.path.join(ONNX_DIR, fname)
         if os.path.exists(fpath):
             size = os.path.getsize(fpath) / 1e6
-            print(f"  {fname:25s}  {size:6.1f} MB")
+            print(f"  {fname:25s}  {size:7.1f} MB  ✓")
         else:
-            print(f"  {fname:25s}  MISSING")
+            print(f"  {fname:25s}  MISSING  ({note})")
 
-    print(f"\nAll models ready in: {ONNX_DIR}")
-    print("Run the C++ pipeline:")
-    print(f"  cd {ROOT}/build && ./fast_sam_3dbody_run --onnx-dir {ONNX_DIR}")
+    print(f"\nModels ready in: {ONNX_DIR}")
+    print("Build the C++ pipeline:")
+    print(f"  cd {ROOT}/build && cmake .. && make -j$(nproc)")
+    print("Run (MHR params only, fastest):")
+    print(f"  ./fast_sam_3dbody_run --onnx-dir {ONNX_DIR} --gguf {ONNX_DIR}/pipeline.gguf --yolo {ONNX_DIR}/yolo.onnx --from 0 --skip-body")
 
 
 if __name__ == "__main__":

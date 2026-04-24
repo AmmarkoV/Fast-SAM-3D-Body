@@ -106,13 +106,17 @@ def convert(checkpoint_dir: str, output_path: str, dtype_str: str = "f16"):
     img_std  = list(cfg.MODEL.IMAGE_STD)
     img_size = int(cfg.MODEL.IMAGE_SIZE[0])
 
-    # Determine FFN dimensions from the collected tensors
-    mhr_in_dim  = int(tensors[0][1].shape[1])  # fc0.weight Cin
-    mhr_hid_dim = int(tensors[0][1].shape[0])  # fc0.weight Cout
-    mhr_out_dim = int(tensors[-3][1].shape[0]) # last weight Cout before cam tensors
-    # Camera head follows MHR — last two (weight+bias) are cam_proj.fc1
-    cam_out_dim = int(tensors[-1][1].shape[0] if "cam_proj" in tensors[-1][0]
-                      else 3)
+    # Determine FFN dimensions by name lookup (robust against tensor count changes)
+    def _dim(suffix: str) -> int:
+        for name, arr in tensors:
+            if name.endswith(suffix):
+                return int(arr.shape[0])
+        raise KeyError(f"tensor ending with '{suffix}' not found")
+
+    mhr_in_dim  = int(next(arr.shape[1] for n, arr in tensors if n == "mhr_proj.fc0.weight"))
+    mhr_hid_dim = _dim("mhr_proj.fc0.weight")   # Cout of first layer
+    mhr_out_dim = _dim("mhr_proj.fc1.weight")    # Cout of second layer = npose (519)
+    cam_out_dim = _dim("cam_proj.fc1.weight")    # Cout of camera head  = 3
 
     # Decoder dim (context dim for backbone features)
     backbone_dim  = 1280  # dinov3_vith16plus
@@ -168,8 +172,10 @@ def convert(checkpoint_dir: str, output_path: str, dtype_str: str = "f16"):
     writer.add_uint32("sam3dbody.decoder_dim", mhr_in_dim)
     writer.add_uint32("sam3dbody.npose",       mhr_out_dim)
 
-    qtype = GGMLQuantizationType.F16 if dtype_str == "f16" else GGMLQuantizationType.F32
+    w_qtype = GGMLQuantizationType.F16 if dtype_str == "f16" else GGMLQuantizationType.F32
+    b_qtype = GGMLQuantizationType.F32  # biases stay F32 to match numpy dtype
     for name, arr in tensors:
+        qtype = b_qtype if name.endswith(".bias") else w_qtype
         writer.add_tensor(name, arr, raw_dtype=qtype)
 
     writer.write_header_to_file()

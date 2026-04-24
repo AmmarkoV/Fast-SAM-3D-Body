@@ -79,7 +79,8 @@ if(NOT DEFINED ONNX_RUNTIME_DIR OR ONNX_RUNTIME_DIR STREQUAL "")
             else()
                 set(_ORT_SUFFIX "")
             endif()
-            set(ONNX_RUNTIME_DIR  "${_ORT_DOWNLOAD_DIR}/onnxruntime-linux-x64${_ORT_SUFFIX}-${_ORT_VERSION}")
+            # After extraction + rename, contents live directly in _ORT_DOWNLOAD_DIR
+            set(ONNX_RUNTIME_DIR "${_ORT_DOWNLOAD_DIR}")
 
             if(NOT EXISTS "${_ORT_DOWNLOAD_DIR}")
                 message(STATUS "Downloading ONNX Runtime ${_ORT_VERSION} …")
@@ -89,10 +90,9 @@ if(NOT DEFINED ONNX_RUNTIME_DIR OR ONNX_RUNTIME_DIR STREQUAL "")
                     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
                 )
                 file(RENAME
-                    "${CMAKE_BINARY_DIR}/onnxruntime-linux-x64-gpu-${_ORT_VERSION}"
+                    "${CMAKE_BINARY_DIR}/onnxruntime-linux-x64${_ORT_SUFFIX}-${_ORT_VERSION}"
                     "${_ORT_DOWNLOAD_DIR}"
                 )
-                set(ONNX_RUNTIME_DIR "${_ORT_DOWNLOAD_DIR}")
             endif()
         endif()
     endif()
