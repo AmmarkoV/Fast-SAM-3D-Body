@@ -630,14 +630,21 @@ struct Pipeline::Impl {
             Ort::Value bparam_t = Ort::Value::CreateTensor<float>(mi, batch_bparams.data(), B*204, bparam_sh.data(), 2);
             Ort::Value face_t   = Ort::Value::CreateTensor<float>(mi, batch_face.data(),    B*72,  face_sh.data(),   2);
 
+            // apply_correctives = False (constant bool tensor)
+            bool corr_val = false;
+            std::vector<int64_t> scalar_sh{};
+            Ort::Value corr_t = Ort::Value::CreateTensor<bool>(mi, &corr_val, 1,
+                                                                scalar_sh.data(), 0);
+
             std::vector<Ort::Value> body_ins;
             body_ins.push_back(std::move(shape_t));
             body_ins.push_back(std::move(bparam_t));
             body_ins.push_back(std::move(face_t));
+            body_ins.push_back(std::move(corr_t));
 
             auto body_out = sess_body.session->Run(
                 Ort::RunOptions{nullptr},
-                sess_body.input_names.data(),  body_ins.data(),  3,
+                sess_body.input_names.data(),  body_ins.data(),  4,
                 sess_body.output_names.data(), 2);
 
             const float* vp = body_out[0].GetTensorData<float>();

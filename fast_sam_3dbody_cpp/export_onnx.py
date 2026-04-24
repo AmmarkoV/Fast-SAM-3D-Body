@@ -328,21 +328,20 @@ def export_body_model(model, out_dir: str, opset: int = 18):
     path = os.path.join(out_dir, "body_model.onnx")
     print(f"\n── body_model → {path}")
 
+    # mhr_jit is a torch.jit.ScriptModule – export it directly.
+    # apply_correctives is passed as a bool tensor constant (always False).
     mhr_jit = model.head_pose.mhr
-    wrapper = BodyModelWrapper(mhr_jit)
-    wrapper.eval().cuda()
+    mhr_jit.eval().cuda()
 
     B = 1
-    shape  = torch.randn(B, 45,  device="cuda")
-    bparams= torch.randn(B, 204, device="cuda")
-    face   = torch.zeros(B, 72,  device="cuda")
+    shape   = torch.randn(B, 45,  device="cuda")
+    bparams = torch.randn(B, 204, device="cuda")
+    face    = torch.zeros(B, 72,  device="cuda")
+    corr    = torch.tensor(False, device="cuda")  # apply_correctives=False constant
 
     with torch.no_grad():
-        verts, skel = wrapper(shape, bparams, face)
+        verts, skel = mhr_jit(shape, bparams, face, False)
     print(f"   verts {tuple(verts.shape)}  skel {tuple(skel.shape)}")
-
-    # Script the wrapper so the torch.jit.ScriptModule submodule is reachable
-    scripted = torch.jit.script(wrapper)
 
     dyn = {
         "shape":       {0: "B"},
@@ -352,10 +351,10 @@ def export_body_model(model, out_dir: str, opset: int = 18):
         "skeleton":    {0: "B"},
     }
     torch.onnx.export(
-        scripted,
-        (shape, bparams, face),
+        mhr_jit,
+        (shape, bparams, face, corr),
         path,
-        input_names =["shape", "body_params", "face"],
+        input_names =["shape", "body_params", "face", "apply_correctives"],
         output_names=["vertices", "skeleton"],
         dynamic_axes=dyn,
         opset_version=opset,
