@@ -1,0 +1,329 @@
+# fast_sam_3dbody_cpp
+
+Standalone C++ inference engine for **Fast SAM 3D Body** — zero Python dependency at runtime.
+
+Takes a BGR image and produces per-person MHR body pose parameters, camera translation, and optionally full 3D mesh vertices, all via ONNX Runtime + ggml.
+
+Also includes two Python frontends that call the compiled shared library via ctypes.
+
+---
+
+## Pipeline
+
+```
+BGR image
+  │
+  ▼  yolo.onnx            ONNX Runtime (CUDA EP)   person bboxes + 17 COCO keypoints
+  │
+  ▼  backbone.onnx        ONNX Runtime (CUDA EP)   feature map  [B, 1280, 32, 32]
+  │   DINOv3-ViT-H/14+
+  │
+  ▼  decoder.onnx         ONNX Runtime (CUDA EP)   pose token   [B, 1024]
+  │   6-layer PromptableDecoder
+  │
+  ▼  pipeline.gguf        CPU matmul (ggml)         MHR params [B, 519] + camera [B, 3]
+  │   MHR head + camera head weights
+  │
+  ▼  body_model.onnx      ONNX Runtime (optional)   vertices [B, 18439, 3]
+```
+
+**Per-person output** (`MHRResult` / `FsbResult`):
+
+| Field | Shape | Description |
+|-------|-------|-------------|
+| `bbox` | [4] | x1 y1 x2 y2 in original image pixels |
+| `focal_length` | scalar | Estimated focal length (pixels) |
+| `pred_cam_t` | [3] | Raw camera head output: [s, tx, ty] |
+| `global_rot` | [3] | Global orientation – Euler ZYX (radians) |
+| `body_pose` | [133] | Body joint angles – Euler |
+| `shape` | [45] | SMPL-like identity blend shape betas |
+| `scale` | [28] | Scale PCA components |
+| `hand_pose` | [108] | Hand joints: left [54] + right [54] |
+| `face_params` | [72] | Facial expression parameters |
+| `yolo_kps` | [51] | COCO 17 keypoints × [x, y, confidence] |
+| `kps_3d` | [210] | 70 joints × 3 (when body model runs) |
+| `kps_2d` | [140] | 70 joints × 2 projected (when body model runs) |
+
+---
+
+## Directory layout
+
+```
+fast_sam_3dbody_cpp/
+├── CMakeLists.txt
+├── export_onnx.py              ONNX export – backbone, decoder, body_model
+├── convertModelToGGUF.py       GGUF export – MHR + camera projection heads
+├── prepare_models.py           One-shot model preparation (runs both scripts above)
+├── fast_sam_3dbody_frontend.py       Python lightweight frontend (ctypes, no extra deps)
+├── fast_sam_3dbody_frontend-3D.py    Python 3D frontend (ctypes + Python body model)
+├── onnx/                       Runtime model files (generated – not in git)
+│   ├── backbone.onnx           ~3 MB stub
+│   ├── backbone.onnx.data      ~3.2 GB weights
+│   ├── decoder.onnx            ~174 MB
+│   ├── pipeline.gguf           ~5 MB
+│   ├── yolo.onnx               ~81 MB
+│   └── body_model.pt           ~664 MB (optional)
+└── src/
+    ├── fast_sam_3dbody.h       C++ public API
+    ├── fast_sam_3dbody.cpp     Pipeline implementation
+    ├── fast_sam_3dbody_capi.h  Plain C API (for ctypes)
+    ├── fast_sam_3dbody_capi.cpp
+    ├── preprocess.hpp          Crop, normalise, ray_cond, NMS, pose conversion
+    └── main.cpp                CLI executable
+```
+
+---
+
+## Setup
+
+### 1. Prepare ONNX / GGUF models
+
+Run once from the **repo root** with the Python venv active:
+
+```bash
+source venv/bin/activate   # or: conda activate fast_sam_3d_body
+
+python fast_sam_3dbody_cpp/prepare_models.py \
+    --checkpoint ./checkpoints/sam-3d-body-dinov3
+```
+
+This produces `fast_sam_3dbody_cpp/onnx/` with all runtime files. Skip individual steps if they already exist:
+
+```bash
+python fast_sam_3dbody_cpp/prepare_models.py --skip onnx   # backbone + decoder already done
+python fast_sam_3dbody_cpp/prepare_models.py --skip gguf   # pipeline.gguf already done
+python fast_sam_3dbody_cpp/prepare_models.py --skip yolo   # yolo.onnx already done
+```
+
+### 2. Build
+
+Requirements: CMake ≥ 3.18, C++17 compiler, OpenCV (core/imgproc/videoio/highgui/dnn), optional CUDA Toolkit.
+
+```bash
+cd fast_sam_3dbody_cpp
+mkdir -p build && cd build
+
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+```
+
+CMake handles dependencies automatically:
+- **ONNX Runtime 1.20.1** – downloaded from GitHub releases if not found; point to an existing install with `-DONNX_RUNTIME_DIR=/path/to/onnxruntime`
+- **ggml** – fetched via `FetchContent` from GitHub
+- **CUDA** – auto-detected; set `-DCMAKE_CUDA_ARCHITECTURES=86` (or `75`, `89`, etc.) for your GPU; falls back to CPU-only if not found
+
+Outputs in `build/`:
+
+| File | Description |
+|------|-------------|
+| `fast_sam_3dbody_run` | Standalone CLI executable |
+| `libfast_sam_3dbody.so` | Shared library for C++ linking or ctypes |
+
+---
+
+## Running
+
+### CLI executable
+
+```bash
+cd fast_sam_3dbody_cpp/build
+
+# Single image – prints pose params to stdout
+./fast_sam_3dbody_run \
+    --onnx-dir ../onnx \
+    --gguf     ../onnx/pipeline.gguf \
+    --yolo     ../onnx/yolo.onnx \
+    --from     ../../assets/teaser.png
+
+# Webcam (device 0)
+./fast_sam_3dbody_run \
+    --onnx-dir ../onnx --gguf ../onnx/pipeline.gguf --yolo ../onnx/yolo.onnx \
+    --from 0
+
+# Video file
+./fast_sam_3dbody_run \
+    --onnx-dir ../onnx --gguf ../onnx/pipeline.gguf --yolo ../onnx/yolo.onnx \
+    --from /path/to/video.mp4
+
+# Fastest mode – skip LBS body model (no vertices, just pose params)
+./fast_sam_3dbody_run ... --skip-body
+
+# CPU-only
+./fast_sam_3dbody_run ... --cuda -1
+```
+
+Full option list:
+
+```
+--onnx-dir PATH    Directory with backbone/decoder/body_model ONNX files
+--gguf     PATH    pipeline.gguf (MHR + camera heads)
+--yolo     PATH    YOLO pose model (.onnx)
+--from     SRC     Webcam index (0,1,..) or path to image/video
+--cuda     DEVICE  CUDA device index (default 0; -1 = CPU)
+--skip-body        Skip body model (no vertices / keypoints)
+--thresh   T       YOLO person confidence threshold (default 0.50)
+--nms      T       YOLO NMS IoU threshold (default 0.45)
+--fx / --fy F      Camera focal length x/y in pixels (0 = image width)
+--cx / --cy F      Principal point (0 = image centre)
+--info             Print pipeline info and exit
+--help             Show this message
+```
+
+### Python lightweight frontend
+
+Draws COCO 2D skeletons and a pose-bar panel. Requires only `opencv-python` and `numpy` — no PyTorch.
+
+```bash
+# From the repo root:
+python fast_sam_3dbody_cpp/fast_sam_3dbody_frontend.py --from assets/teaser.png
+
+# Webcam, cap at 3 persons
+python fast_sam_3dbody_cpp/fast_sam_3dbody_frontend.py --from 0 --max-skeletons 3
+
+# Save output image / video
+python fast_sam_3dbody_cpp/fast_sam_3dbody_frontend.py \
+    --from assets/teaser.png --out out.jpg
+
+python fast_sam_3dbody_cpp/fast_sam_3dbody_frontend.py \
+    --from video.mp4 --headless --out out.mp4
+```
+
+Key options (same as CLI, plus):
+
+```
+--max-skeletons N  Cap persons drawn per frame (0 = unlimited)
+--headless         No display window
+--out PATH         Write result to image or video file
+```
+
+### Python 3D frontend
+
+Full 3D mesh rendering identical to `demo_webcam.py`: four-panel output
+`[original | 2D skeleton | front mesh | side mesh]`.
+
+Uses the C engine for the fast path (YOLO → backbone → decoder → MHR FFN heads),
+then calls the Python MHR body model (`mhr_model.pt`) for LBS skinning to produce
+mesh vertices. Requires the full Python environment (PyTorch, sam_3d_body package, pyrender).
+
+```bash
+python fast_sam_3dbody_cpp/fast_sam_3dbody_frontend-3D.py --from assets/teaser.png
+
+# Webcam
+python fast_sam_3dbody_cpp/fast_sam_3dbody_frontend-3D.py --from 0 --max-skeletons 3
+
+# Custom checkpoint paths
+python fast_sam_3dbody_cpp/fast_sam_3dbody_frontend-3D.py \
+    --from assets/teaser.png \
+    --checkpoint ./checkpoints/sam-3d-body-dinov3/model.ckpt \
+    --mhr-model  ./checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt
+
+# Save result
+python fast_sam_3dbody_cpp/fast_sam_3dbody_frontend-3D.py \
+    --from assets/teaser.png --out result_3d.jpg
+```
+
+Key options (same as lightweight frontend, plus):
+
+```
+--checkpoint PATH  Path to model.ckpt (default: checkpoints/sam-3d-body-dinov3/model.ckpt)
+--mhr-model  PATH  Path to mhr_model.pt
+--device     STR   PyTorch device for body model: cuda or cpu (default: auto)
+```
+
+---
+
+## C++ library API
+
+```cpp
+#include "fast_sam_3dbody.h"
+
+fsb::PipelineConfig cfg;
+cfg.onnx_dir        = "./onnx";
+cfg.gguf_path       = "./onnx/pipeline.gguf";
+cfg.yolo_path       = "./onnx/yolo.onnx";
+cfg.cuda_device     = 0;       // -1 = CPU only
+cfg.skip_body_model = true;    // faster: no vertices
+cfg.max_persons     = 4;       // 0 = unlimited
+
+fsb::Pipeline pipeline;
+pipeline.load(cfg);
+
+// BGR uint8 pointer, width, height
+std::vector<fsb::MHRResult> results =
+    pipeline.process_bgr(bgr_ptr, width, height);
+
+for (const auto& r : results) {
+    // r.bbox          [4]   x1 y1 x2 y2 (original image pixels)
+    // r.global_rot    [3]   Euler ZYX global orientation
+    // r.body_pose     [133] joint angles
+    // r.shape         [45]  identity betas
+    // r.pred_cam_t    [3]   raw camera head: [s, tx, ty]
+    // r.focal_length        estimated focal length (pixels)
+    // r.keypoints_yolo[51]  COCO 17 × [x,y,conf]
+    // r.pred_vertices [18439*3]  (empty when skip_body_model=true)
+}
+
+pipeline.free();
+```
+
+## Plain C / ctypes API
+
+```c
+#include "fast_sam_3dbody_capi.h"
+
+FsbHandle h = fsb_create();
+
+FsbConfig cfg = {
+    .onnx_dir        = "./onnx",
+    .gguf_path       = "./onnx/pipeline.gguf",
+    .yolo_path       = "./onnx/yolo.onnx",
+    .cuda_device     = 0,
+    .skip_body_model = 1,
+    .person_thresh   = 0.5f,
+    .person_nms_iou  = 0.45f,
+    .max_persons     = 0,
+};
+fsb_load(h, &cfg);
+
+FsbResult results[32];
+int n = fsb_process_bgr(h, bgr, width, height, results, 32);
+
+for (int i = 0; i < n; i++) {
+    // results[i].bbox, .body_pose, .yolo_kps, ...
+}
+
+fsb_destroy(h);
+```
+
+---
+
+## Performance notes
+
+| Stage | Time (RTX 3090, B=1) |
+|-------|----------------------|
+| YOLO detection | ~5 ms |
+| Backbone (DINOv3-ViT-H) | ~150–200 ms |
+| Decoder (6-layer) | ~20 ms |
+| MHR + camera FFN (CPU) | <1 ms |
+| Body model ONNX (optional) | ~15 ms |
+
+- Backbone is the bottleneck; it dominates end-to-end latency.
+- Use `--skip-body` unless 3D vertices are required.
+- For higher throughput, batch multiple crops in a single backbone forward pass (already done when multiple persons are detected).
+
+---
+
+## Distributing models
+
+```bash
+# From repo root – package all runtime models into a zip (~3.5 GB)
+bash scripts/create_redist.sh
+
+# Include Python checkpoint (model.ckpt + mhr_model.pt, ~6 GB total)
+bash scripts/create_redist.sh --with-python
+
+# Include body_model.pt (~664 MB extra)
+bash scripts/create_redist.sh --with-body
+```
+
+Output: `fast_sam_3dbody_models_YYYYMMDD.zip`
