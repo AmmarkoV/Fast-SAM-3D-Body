@@ -198,29 +198,43 @@ struct OrtSession {
     bool load(Ort::Env& e, const std::string& path, bool cuda, int device,
               bool fp16_io = false, bool trt_ep = false)
     {
-        Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(1);
-        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-        if (cuda && !trt_ep) {
-            OrtCUDAProviderOptions cp{};
-            cp.device_id = device;
-            opts.AppendExecutionProvider_CUDA(cp);
-        }
+        // Try with the requested EP first; fall back to CPU if it fails to load
+        // (e.g. libcudnn not installed, CUDA EP shared library missing).
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            bool try_cuda = cuda && (attempt == 0);
+            Ort::SessionOptions opts;
+            opts.SetIntraOpNumThreads(1);
+            opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+            try {
+                if (try_cuda && !trt_ep) {
+                    OrtCUDAProviderOptions cp{};
+                    cp.device_id = device;
+                    opts.AppendExecutionProvider_CUDA(cp);
+                }
 #if defined(USE_TENSORRT_EP)
-        if (trt_ep) {
-            OrtTensorRTProviderOptions tp{};
-            tp.device_id = device;
-            tp.trt_fp16_enable = fp16_io ? 1 : 0;
-            opts.AppendExecutionProvider_TensorRT(tp);
-        }
+                if (try_cuda && trt_ep) {
+                    OrtTensorRTProviderOptions tp{};
+                    tp.device_id = device;
+                    tp.trt_fp16_enable = fp16_io ? 1 : 0;
+                    opts.AppendExecutionProvider_TensorRT(tp);
+                }
 #endif
-        try {
-            session = new Ort::Session(e, path.c_str(), opts);
-        } catch (const Ort::Exception& ex) {
-            fprintf(stderr, "[ORT] load '%s' failed: %s\n", path.c_str(), ex.what());
-            return false;
+                session = new Ort::Session(e, path.c_str(), opts);
+                if (!try_cuda && cuda)
+                    fprintf(stderr, "[ORT] WARNING: '%s' running on CPU (CUDA EP unavailable)\n",
+                            path.c_str());
+                break;  // success
+            } catch (const Ort::Exception& ex) {
+                if (try_cuda) {
+                    fprintf(stderr, "[ORT] CUDA EP failed (%s)\n[ORT] Retrying '%s' on CPU…\n",
+                            ex.what(), path.c_str());
+                    continue;  // retry without CUDA
+                }
+                fprintf(stderr, "[ORT] load '%s' failed: %s\n", path.c_str(), ex.what());
+                return false;
+            }
         }
+        if (!session) return false;
         env = &e;
 
         Ort::AllocatorWithDefaultOptions alloc;
