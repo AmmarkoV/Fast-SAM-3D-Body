@@ -444,6 +444,12 @@ struct Pipeline::Impl {
                 for (auto& d : dets) {
                     d.x1 *= sx; d.x2 *= sx;
                     d.y1 *= sy; d.y2 *= sy;
+                    if (d.has_kps) {
+                        for (int k = 0; k < 17; ++k) {
+                            d.kps[k*3 + 0] *= sx;
+                            d.kps[k*3 + 1] *= sy;
+                        }
+                    }
                 }
             } catch (const Ort::Exception& e) {
                 fprintf(stderr, "[FSB] YOLO inference error: %s\n", e.what());
@@ -454,6 +460,9 @@ struct Pipeline::Impl {
         if (dets.empty()) {
             dets.push_back({ 0.f, 0.f, float(W), float(H), 1.f });
         }
+        // Apply max_persons cap (sorted by confidence from NMS)
+        if (cfg.max_persons > 0 && (int)dets.size() > cfg.max_persons)
+            dets.resize(cfg.max_persons);
         printf("[FSB] detection: %.1f ms  persons: %zu\n", ms(t0), dets.size());
 
         // ── per-person crops ──────────────────────────────────────────────────
@@ -651,6 +660,10 @@ struct Pipeline::Impl {
 
             // Face [72]
             r.face_params.assign(p + 447, p + 447 + 72);
+
+            // YOLO 2D keypoints [17 × 3]
+            if (d.has_kps)
+                r.keypoints_yolo.assign(d.kps, d.kps + 51);
 
             // Vertices (optional)
             if (!all_verts.empty()) {

@@ -54,6 +54,9 @@ struct MHRResult {
     std::vector<float> pred_vertices;  // [18439 × 3]  SMPL-like mesh
     std::vector<float> keypoints_3d;   // [70 × 3]     3-D joints
     std::vector<float> keypoints_2d;   // [70 × 2]     projected 2-D
+
+    // 2-D YOLO keypoints: 17 COCO joints × [x, y, confidence], image pixel coords
+    std::vector<float> keypoints_yolo; // [17 × 3]   always populated if YOLO ran
 };
 
 // ─── Pipeline configuration ───────────────────────────────────────────────────
@@ -72,6 +75,7 @@ struct PipelineConfig {
     bool skip_body_model = false;   // Skip body model – no vertices/keypoints (faster)
     float person_thresh  = 0.50f;  // YOLO confidence threshold
     float person_nms_iou = 0.45f;  // YOLO NMS IoU threshold
+    int  max_persons     = 0;      // 0 = unlimited; >0 = cap after NMS (top-N by conf)
 
     // Camera intrinsics – set to 0 to use default (fx = image_width)
     float focal_x = 0.f;

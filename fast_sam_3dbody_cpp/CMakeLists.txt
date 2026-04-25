@@ -122,6 +122,7 @@ message(STATUS "OpenCV ${OpenCV_VERSION}")
 # ---------------------------------------------------------------------------
 add_library(fast_sam_3dbody SHARED
     src/fast_sam_3dbody.cpp
+    src/fast_sam_3dbody_capi.cpp
 )
 
 target_include_directories(fast_sam_3dbody PUBLIC

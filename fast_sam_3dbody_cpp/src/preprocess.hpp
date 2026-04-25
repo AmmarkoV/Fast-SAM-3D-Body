@@ -162,6 +162,9 @@ inline void compute_ray_cond(
 struct PersonDet {
     float x1, y1, x2, y2;  // pixel coords
     float conf;
+    // 17 COCO keypoints: [x, y, vis] each, in YOLO pixel space (0–640 before scale)
+    float kps[51] = {};
+    bool  has_kps = false;
 };
 
 static inline float iou(const PersonDet& a, const PersonDet& b) {
@@ -199,6 +202,11 @@ inline std::vector<PersonDet> parse_yolo_output(
         d.x2   = cx + w * 0.5f;
         d.y2   = cy + h * 0.5f;
         d.conf = conf;
+        // Keypoints: columns 5..55 → 17 × (x, y, visibility)
+        if (num_dets > 0 && 56 > 5) {
+            std::memcpy(d.kps, row + 5, 51 * sizeof(float));
+            d.has_kps = true;
+        }
         raw.push_back(d);
     }
 
