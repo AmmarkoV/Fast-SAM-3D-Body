@@ -301,11 +301,12 @@ int main(int argc, const char** argv) {
         if (numeric) {
             cap.open(std::stoi(src));
         } else {
-            cap.open(src);
-            if (!cap.isOpened()) {
-                static_img = cv::imread(src);
-                is_image   = !static_img.empty();
-                if (!is_image) { fprintf(stderr,"Cannot open: %s\n", src.c_str()); return 1; }
+            static_img = cv::imread(src);
+            if (!static_img.empty()) {
+                is_image = true;
+            } else {
+                cap.open(src);
+                if (!cap.isOpened()) { fprintf(stderr,"Cannot open: %s\n", src.c_str()); return 1; }
             }
         }
     }
@@ -341,17 +342,13 @@ int main(int argc, const char** argv) {
            tri_model->header.numberOfVertices / 3,
            tri_model->header.numberOfIndices / 3);
 
-    printf("Uploading mesh to GPU...\n"); fflush(stdout);
     MeshGPU mesh_gpu = upload_mesh_once(tri_model);
-    printf("Mesh on GPU. Creating quad VAO...\n"); fflush(stdout);
 
     // Empty VAO for the quad (we use gl_VertexID in the vertex shader)
     GLuint quad_vao;
     glGenVertexArrays(1, &quad_vao);
-    printf("Quad VAO ready. Creating bg texture...\n"); fflush(stdout);
 
     BgTex bg = create_bg_tex();
-    printf("Entering render loop.\n"); fflush(stdout);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -368,9 +365,7 @@ int main(int argc, const char** argv) {
         }
 
         // Inference
-        printf("Running inference...\n"); fflush(stdout);
         auto results = pipeline.process_bgr(frame.data, frame.cols, frame.rows);
-        printf("Frame: %d person(s) detected\n", (int)results.size()); fflush(stdout);
 
         // Draw YOLO 2D skeleton on frame when 3D mesh is unavailable (body_model.pt
         // not yet loaded in C++ pipeline — LibTorch integration is a future step).
