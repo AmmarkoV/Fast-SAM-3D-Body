@@ -170,6 +170,7 @@ add_executable(fast_sam_3dbody_render
     render/fast_sam_3dbody_render.cpp
     ${GRAPHICS_ENGINE_DIR}/System/glx3.c
     ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_tri.c
+    ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_transform_joints.c
 )
 
 target_compile_definitions(fast_sam_3dbody_render PRIVATE USE_GLEW)
@@ -190,6 +191,7 @@ target_link_libraries(fast_sam_3dbody_render PRIVATE
     X11
     rt
     m
+    ${CMAKE_CURRENT_SOURCE_DIR}/AmMatrix/libAmMatrix.a
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

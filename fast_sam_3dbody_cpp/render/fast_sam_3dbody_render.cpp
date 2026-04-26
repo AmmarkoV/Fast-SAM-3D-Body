@@ -16,6 +16,7 @@
 extern "C" {
 #include "../GraphicsEngine/System/glx3.h"
 #include "../GraphicsEngine/ModelLoader/model_loader_tri.h"
+#include "../GraphicsEngine/ModelLoader/model_loader_transform_joints.h"
 }
 
 #include "../src/fast_sam_3dbody.h"
@@ -254,6 +255,7 @@ int main(int argc, const char** argv) {
     std::string gguf_path = "./onnx/pipeline.gguf";
     std::string yolo_path = "./onnx/yolo.onnx";
     std::string mesh_path = "./body_mesh.tri";
+    std::string lbs_path  = "";
     std::string src       = "0";
     std::string save_path = "";
     int  cuda_device = 0;
@@ -267,6 +269,7 @@ int main(int argc, const char** argv) {
         A1("--gguf",     gguf_path, std::string)
         A1("--yolo",     yolo_path, std::string)
         A1("--mesh",     mesh_path, std::string)
+        A1("--lbs",      lbs_path,  std::string)
         A1("--from",     src,       std::string)
         A1("--save",     save_path, std::string)
         A1("--cuda",     cuda_device, std::stoi)
@@ -285,7 +288,7 @@ int main(int argc, const char** argv) {
         cfg.cuda_device     = cuda_device;
         cfg.use_trt_ep      = use_trt;
         cfg.use_fp16        = fp16;
-        cfg.skip_body_model = false;   // pred_vertices required
+        cfg.skip_body_model = true;    // LBS runs natively in C; skip body_model.onnx
         if (!pipeline.load(cfg)) {
             fprintf(stderr, "Failed to load pipeline\n"); return 1;
         }
@@ -344,6 +347,12 @@ int main(int argc, const char** argv) {
 
     MeshGPU mesh_gpu = upload_mesh_once(tri_model);
 
+    // ── Load LBS data ─────────────────────────────────────────────────────────
+    if (lbs_path.empty()) lbs_path = onnx_dir + "/body_model.lbs";
+    struct MHR_LBS_Data* lbs = mhr_lbs_load(lbs_path.c_str());
+    if (!lbs) fprintf(stderr, "Warning: LBS data not loaded — mesh will not deform\n");
+    std::vector<float> lbs_out(MHR_VERTEX_FLOATS, 0.f);
+
     // Empty VAO for the quad (we use gl_VertexID in the vertex shader)
     GLuint quad_vao;
     glGenVertexArrays(1, &quad_vao);
@@ -367,13 +376,9 @@ int main(int argc, const char** argv) {
         // Inference
         auto results = pipeline.process_bgr(frame.data, frame.cols, frame.rows);
 
-        // Draw YOLO 2D skeleton on frame when 3D mesh is unavailable (body_model.pt
-        // not yet loaded in C++ pipeline — LibTorch integration is a future step).
+        // Annotate frame: draw YOLO skeleton when LBS mesh is unavailable.
         cv::Mat vis = frame.clone();
-        bool any_mesh = false;
-        for (const auto& r : results) {
-            if ((int)r.pred_vertices.size() >= MHR_VERTEX_FLOATS) { any_mesh = true; break; }
-        }
+        bool any_mesh = lbs && !results.empty();
         if (!any_mesh) {
             for (const auto& r : results)
                 draw_yolo_skeleton(vis, r.keypoints_yolo);
@@ -399,10 +404,15 @@ int main(int argc, const char** argv) {
         // ── Mesh overlay for each detected person ─────────────────────────────
         glUseProgram(prog_mesh);
         for (const auto& r : results) {
-            if ((int)r.pred_vertices.size() < MHR_VERTEX_FLOATS) continue;
+            if (!lbs) continue;
 
-            // Copy deformed vertices into TRI model buffer, then stream to GPU
-            mhr_update_mesh_vertices(tri_model, r.pred_vertices.data());
+            // Run native C LBS forward pass, stream result to GPU
+            mhr_lbs_compute(lbs,
+                            r.mhr_model_params.data(),
+                            r.shape.data(),
+                            r.face_params.data(),
+                            lbs_out.data());
+            mhr_update_mesh_vertices(tri_model, lbs_out.data());
             glBindBuffer(GL_ARRAY_BUFFER, mesh_gpu.vbo_pos);
             glBufferSubData(GL_ARRAY_BUFFER, 0,
                             MHR_VERTEX_FLOATS * sizeof(float),
@@ -434,6 +444,7 @@ int main(int argc, const char** argv) {
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
+    mhr_lbs_free(lbs);
     tri_freeModel(tri_model);
     stop_glx3_stuff();
     return 0;
