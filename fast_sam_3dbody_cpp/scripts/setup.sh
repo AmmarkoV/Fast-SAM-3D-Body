@@ -14,13 +14,16 @@
 #   bash fast_sam_3dbody_cpp/setup.sh --skip-build          # venv only
 #   bash fast_sam_3dbody_cpp/setup.sh --skip-venv           # build only
 #   bash fast_sam_3dbody_cpp/setup.sh -j 4                  # limit make jobs
+THISDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$THISDIR"
+
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-BUILD_DIR="${SCRIPT_DIR}/build"
-VENV_DIR="${SCRIPT_DIR}/venv"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../" && pwd)"
+BUILD_DIR="${SCRIPT_DIR}/../build"
+VENV_DIR="${SCRIPT_DIR}/../venv"
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 CUDA_ARCH=""

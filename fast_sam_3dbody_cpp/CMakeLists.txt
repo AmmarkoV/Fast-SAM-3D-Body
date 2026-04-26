@@ -159,6 +159,45 @@ target_compile_options(fast_sam_3dbody_run PRIVATE
 )
 
 # ---------------------------------------------------------------------------
+# fast_sam_3dbody_render  executable  (OpenGL overlay renderer)
+# ---------------------------------------------------------------------------
+find_package(OpenGL REQUIRED)
+find_package(GLEW   REQUIRED)
+
+set(GRAPHICS_ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/GraphicsEngine)
+
+add_executable(fast_sam_3dbody_render
+    render/fast_sam_3dbody_render.cpp
+    ${GRAPHICS_ENGINE_DIR}/System/glx3.c
+    ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_tri.c
+)
+
+target_compile_definitions(fast_sam_3dbody_render PRIVATE USE_GLEW)
+
+target_include_directories(fast_sam_3dbody_render PRIVATE
+    src
+    ${GRAPHICS_ENGINE_DIR}
+    ${ORT_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
+    ${GLEW_INCLUDE_DIRS}
+)
+
+target_link_libraries(fast_sam_3dbody_render PRIVATE
+    fast_sam_3dbody
+    OpenGL::GL
+    GLEW::GLEW
+    ${OpenCV_LIBS}
+    X11
+    rt
+    m
+)
+
+target_compile_options(fast_sam_3dbody_render PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wno-unused-parameter -O3 -march=native>
+    $<$<COMPILE_LANGUAGE:C>:-Wall -Wno-unused-parameter -O2>
+)
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 message(STATUS "")
@@ -167,4 +206,4 @@ message(STATUS "  CUDA support  : ${WITH_CUDA}")
 message(STATUS "  ggml CUDA     : ${GGML_CUDA}")
 message(STATUS "  OpenCV        : ${OpenCV_VERSION}")
 message(STATUS "  ORT include   : ${ORT_INCLUDE_DIRS}")
-message(STATUS "  Targets: fast_sam_3dbody (lib)  fast_sam_3dbody_run (exe)")
+message(STATUS "  Targets: fast_sam_3dbody (lib)  fast_sam_3dbody_run (exe)  fast_sam_3dbody_render (exe)")
