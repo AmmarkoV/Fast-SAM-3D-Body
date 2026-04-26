@@ -192,10 +192,17 @@ target_link_libraries(fast_sam_3dbody_render PRIVATE
     m
 )
 
-target_compile_options(fast_sam_3dbody_render PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wno-unused-parameter -O3 -march=native>
-    $<$<COMPILE_LANGUAGE:C>:-Wall -Wno-unused-parameter -O2>
-)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(fast_sam_3dbody_render PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wno-unused-parameter -g -O0>
+        $<$<COMPILE_LANGUAGE:C>:-Wall -Wno-unused-parameter -g -O0>
+    )
+else()
+    target_compile_options(fast_sam_3dbody_render PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wno-unused-parameter -O3 -march=native>
+        $<$<COMPILE_LANGUAGE:C>:-Wall -Wno-unused-parameter -O2>
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # Summary

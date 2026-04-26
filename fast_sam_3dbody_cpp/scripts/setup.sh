@@ -14,9 +14,6 @@
 #   bash fast_sam_3dbody_cpp/setup.sh --skip-build          # venv only
 #   bash fast_sam_3dbody_cpp/setup.sh --skip-venv           # build only
 #   bash fast_sam_3dbody_cpp/setup.sh -j 4                  # limit make jobs
-THISDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$THISDIR"
-
 
 set -euo pipefail
 
