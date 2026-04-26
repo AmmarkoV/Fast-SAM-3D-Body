@@ -50,6 +50,9 @@ struct MHRResult {
     // Face expression
     std::vector<float> face_params;    // [72]
 
+    // Raw model params fed to the LBS pipeline  [204]
+    std::array<float, 204> mhr_model_params{};
+
     // ── Geometry (populated when Pipeline::Config::skip_body_model = false) ──
     std::vector<float> pred_vertices;  // [18439 × 3]  SMPL-like mesh
     std::vector<float> keypoints_3d;   // [70 × 3]     3-D joints

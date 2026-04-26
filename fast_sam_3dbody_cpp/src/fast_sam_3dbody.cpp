@@ -675,6 +675,16 @@ struct Pipeline::Impl {
             // Face [72]
             r.face_params.assign(p + 447, p + 447 + 72);
 
+            // Model params [204] for native C LBS
+            {
+                float ge[3];
+                rot6d_to_euler(p, ge);
+                float be[133] = {};
+                compact_cont_to_body_params(p + 6, be);
+                ModelParams204 mp = build_model_params(ge, be, nullptr, true);
+                std::memcpy(r.mhr_model_params.data(), mp.data, 204 * sizeof(float));
+            }
+
             // YOLO 2D keypoints [17 × 3]
             if (d.has_kps)
                 r.keypoints_yolo.assign(d.kps, d.kps + 51);
