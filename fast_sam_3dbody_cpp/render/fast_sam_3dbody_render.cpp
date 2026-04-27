@@ -190,13 +190,53 @@ static void upload_bg_frame(BgTex& t, const cv::Mat& bgr) {
 
 static void mat4_mul(float dst[16], const float a[16], const float b[16]) {
     for (int c = 0; c < 4; ++c)
-        for (int r = 0; r < 4; ++r) {
+        for (int r = 0; r < 4; ++r) 
+        {
             dst[c*4+r] = 0.f;
             for (int k = 0; k < 4; ++k)
                 dst[c*4+r] += a[k*4+r] * b[c*4+k];
         }
 }
 
+static void mat4_print(const char * label,float m[16])
+{
+ fprintf(stderr,"%s\n",label);
+ fprintf(stderr,"_________________________\n");
+ fprintf(stderr,"%0.2f %0.2f %0.2f %0.2f\n",m[0],m[1],m[2],m[3]);
+ fprintf(stderr,"%0.2f %0.2f %0.2f %0.2f\n",m[4],m[5],m[6],m[7]);
+ fprintf(stderr,"%0.2f %0.2f %0.2f %0.2f\n",m[8],m[9],m[10],m[11]);
+ fprintf(stderr,"%0.2f %0.2f %0.2f %0.2f\n",m[12],m[13],m[14],m[15]);
+ fprintf(stderr,"_________________________\n");
+}
+
+
+
+int mat4_transpose(float * mat)
+{
+  if (mat!=0)
+  {
+  /*       -------  TRANSPOSE ------->
+      0   1   2   3           0  4  8   12
+      4   5   6   7           1  5  9   13
+      8   9   10  11          2  6  10  14
+      12  13  14  15          3  7  11  15   */
+
+  float tmp;
+  tmp = mat[1]; mat[1]=mat[4];  mat[4]=tmp;
+  tmp = mat[2]; mat[2]=mat[8];  mat[8]=tmp;
+  tmp = mat[3]; mat[3]=mat[12]; mat[12]=tmp;
+
+
+  tmp = mat[6]; mat[6]=mat[9]; mat[9]=tmp;
+  tmp = mat[13]; mat[13]=mat[7]; mat[7]=tmp;
+  tmp = mat[14]; mat[14]=mat[11]; mat[11]=tmp;
+  } else
+  { //Believe it or not this is the fastest branch prediction :P
+    return 0;
+  }
+
+ return 1;
+}
 // ── Callbacks required by glx3.c ─────────────────────────────────────────────
 
 extern "C" {
@@ -208,7 +248,8 @@ extern "C" {
 
 // ── YOLO skeleton joint pairs (COCO 17-joint order) ─────────────────────────
 
-static const int COCO_PAIRS[][2] = {
+static const int COCO_PAIRS[][2] = 
+{
     {0,1},{0,2},{1,3},{2,4},                          // head
     {5,6},{5,7},{7,9},{6,8},{8,10},                   // arms
     {5,11},{6,12},{11,12},{11,13},{13,15},{12,14},{14,16} // torso+legs
@@ -217,7 +258,8 @@ static const int N_COCO_PAIRS = 17;
 
 static void draw_yolo_skeleton(cv::Mat& img,
                                 const std::vector<float>& kps,
-                                float conf_thresh = 0.3f) {
+                                float conf_thresh = 0.3f) 
+{
     if ((int)kps.size() < 51) return;
     // Draw limb lines first, then joint dots on top
     for (int p = 0; p < N_COCO_PAIRS; ++p) {
@@ -365,10 +407,13 @@ int main(int argc, const char** argv) {
 
     // ── Render loop ───────────────────────────────────────────────────────────
     cv::Mat frame;
-    while (glx3_checkEvents()) {
-        if (is_image) {
+    while (glx3_checkEvents()) 
+    {
+        if (is_image) 
+        {
             frame = static_img;
-        } else {
+        } else 
+        {
             cap >> frame;
             if (frame.empty()) break;
         }
@@ -379,6 +424,7 @@ int main(int argc, const char** argv) {
         // Annotate frame: draw YOLO skeleton when LBS mesh is unavailable.
         cv::Mat vis = frame.clone();
         bool any_mesh = lbs && !results.empty();
+        any_mesh = true;
         if (!any_mesh) {
             for (const auto& r : results)
                 draw_yolo_skeleton(vis, r.keypoints_yolo);
@@ -423,7 +469,17 @@ int main(int argc, const char** argv) {
             mhr_camera_matrices(proj, view,
                                 r.focal_length, r.pred_cam_t.data(),
                                 W, H);
+
+
+            //view[0]=1.0; view[1]=0.0; view[2]=0.0; view[3]=0.0;
+            //view[4]=0.0; view[5]=1.0; view[6]=0.0; view[7]=0.0;
+            //view[8]=0.0; view[9]=0.0; view[10]=1.0; view[11]=100.0;
+            //view[12]=0.0; view[13]=0.0; view[14]=0.0; view[15]=1.0;
             mat4_mul(mvp, proj, view);
+            //mat4_transpose(mvp);
+            mat4_print("Projection",proj);
+            mat4_print("View",view);
+            mat4_print("MVP",mvp);
 
             glUniformMatrix4fv(mvp_loc, 1, GL_FALSE, mvp);
 
