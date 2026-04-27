@@ -424,7 +424,7 @@ int main(int argc, const char** argv) {
         // Annotate frame: draw YOLO skeleton when LBS mesh is unavailable.
         cv::Mat vis = frame.clone();
         bool any_mesh = lbs && !results.empty();
-        any_mesh = true;
+        //any_mesh = true; //Test
         if (!any_mesh) {
             for (const auto& r : results)
                 draw_yolo_skeleton(vis, r.keypoints_yolo);
