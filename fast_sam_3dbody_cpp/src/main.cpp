@@ -10,14 +10,16 @@
 #include <string>
 
 using Clock = std::chrono::steady_clock;
-static double ms_since(Clock::time_point t0) {
+static double ms_since(Clock::time_point t0)
+{
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
-struct Config {
+struct Config
+{
     std::string onnx_dir    = "./onnx";
     std::string gguf_path   = "./onnx/pipeline.gguf";
     std::string yolo_path   = "./onnx/yolo.onnx";
@@ -36,7 +38,8 @@ struct Config {
     bool        info_only   = false;
 };
 
-static void print_usage(const char* prog) {
+static void print_usage(const char* prog)
+{
     printf("Usage: %s [options]\n\n", prog);
     printf("  --onnx-dir PATH   Directory with backbone/decoder/body_model ONNX files\n");
     printf("  --gguf PATH       pipeline.gguf (MHR + camera heads)\n");
@@ -57,9 +60,11 @@ static void print_usage(const char* prog) {
     printf("  --help / -h       This message\n");
 }
 
-static Config parse_args(int argc, char** argv) {
+static Config parse_args(int argc, char** argv)
+{
     Config c;
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 1; i < argc; ++i)
+    {
 #define ARG1(flag, field, conv) \
         if (!strcmp(argv[i], flag) && i+1 < argc) { c.field = conv(argv[++i]); continue; }
         ARG1("--onnx-dir", onnx_dir,    std::string)
@@ -74,16 +79,39 @@ static Config parse_args(int argc, char** argv) {
         ARG1("--cx",       cx,          std::stof)
         ARG1("--cy",       cy,          std::stof)
 #undef ARG1
-        if (!strcmp(argv[i], "--trt"))        { c.use_trt   = true;  continue; }
-        if (!strcmp(argv[i], "--no-fp16"))    { c.fp16      = false; continue; }
-        if (!strcmp(argv[i], "--skip-body"))  { c.skip_body = true;  continue; }
-        if (!strcmp(argv[i], "--headless"))   { c.headless  = true;  continue; }
-        if (!strcmp(argv[i], "--info"))       { c.info_only = true;  continue; }
-        if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-            print_usage(argv[0]); std::exit(0);
+        if (!strcmp(argv[i], "--trt"))
+        {
+            c.use_trt   = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--no-fp16"))
+        {
+            c.fp16      = false;
+            continue;
+        }
+        if (!strcmp(argv[i], "--skip-body"))
+        {
+            c.skip_body = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--headless"))
+        {
+            c.headless  = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--info"))
+        {
+            c.info_only = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h"))
+        {
+            print_usage(argv[0]);
+            std::exit(0);
         }
         fprintf(stderr, "Unknown option: %s\n", argv[i]);
-        print_usage(argv[0]); std::exit(1);
+        print_usage(argv[0]);
+        std::exit(1);
     }
     return c;
 }
@@ -91,7 +119,8 @@ static Config parse_args(int argc, char** argv) {
 // ---------------------------------------------------------------------------
 // Print one MHRResult to stdout
 // ---------------------------------------------------------------------------
-static void print_result(int person_idx, const fsb::MHRResult& r) {
+static void print_result(int person_idx, const fsb::MHRResult& r)
+{
     printf("  person[%d]  bbox=[%.1f,%.1f,%.1f,%.1f]  focal=%.1f  cam_t=[%.3f,%.3f,%.3f]\n",
            person_idx,
            r.bbox[0], r.bbox[1], r.bbox[2], r.bbox[3],
@@ -112,7 +141,8 @@ static void print_result(int person_idx, const fsb::MHRResult& r) {
         printf("%.4f%s", r.shape[j], j+1<5 && j+1<(int)r.shape.size() ? "," : "");
     printf("...]\n");
 
-    if (!r.keypoints_3d.empty()) {
+    if (!r.keypoints_3d.empty())
+    {
         printf("             kp3d[0]=[%.3f,%.3f,%.3f]\n",
                r.keypoints_3d[0], r.keypoints_3d[1], r.keypoints_3d[2]);
     }
@@ -121,7 +151,8 @@ static void print_result(int person_idx, const fsb::MHRResult& r) {
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
-int main(int argc, char** argv) {
+int main(int argc, char** argv)
+{
     Config c = parse_args(argc, argv);
 
     fsb::PipelineConfig pcfg;
@@ -142,7 +173,8 @@ int main(int argc, char** argv) {
     fsb::Pipeline pipeline;
     {
         auto t0 = Clock::now();
-        if (!pipeline.load(pcfg)) {
+        if (!pipeline.load(pcfg))
+        {
             fprintf(stderr, "[main] Pipeline load failed.\n");
             return 1;
         }
@@ -150,7 +182,11 @@ int main(int argc, char** argv) {
     }
 
     pipeline.print_info();
-    if (c.info_only) { pipeline.free(); return 0; }
+    if (c.info_only)
+    {
+        pipeline.free();
+        return 0;
+    }
 
     // -----------------------------------------------------------------------
     // Open input source
@@ -159,25 +195,32 @@ int main(int argc, char** argv) {
     bool is_image = false;
 
     bool src_is_int = !c.input_src.empty() &&
-        c.input_src.find_first_not_of("0123456789") == std::string::npos;
+                      c.input_src.find_first_not_of("0123456789") == std::string::npos;
 
-    if (src_is_int) {
+    if (src_is_int)
+    {
         cap.open(std::stoi(c.input_src));
-    } else {
+    }
+    else
+    {
         // Treat as image if it has a known image extension
         const char* img_exts[] = {".jpg",".jpeg",".png",".bmp",".tiff",".webp", nullptr};
-        for (int k = 0; img_exts[k]; ++k) {
+        for (int k = 0; img_exts[k]; ++k)
+        {
             auto ext = img_exts[k];
             auto elen = strlen(ext);
             if (c.input_src.size() >= elen &&
-                c.input_src.compare(c.input_src.size()-elen, elen, ext) == 0) {
-                is_image = true; break;
+                    c.input_src.compare(c.input_src.size()-elen, elen, ext) == 0)
+            {
+                is_image = true;
+                break;
             }
         }
         if (!is_image) cap.open(c.input_src);
     }
 
-    if (!is_image && !cap.isOpened()) {
+    if (!is_image && !cap.isOpened())
+    {
         fprintf(stderr, "[main] Cannot open input: %s\n", c.input_src.c_str());
         pipeline.free();
         return 1;
@@ -191,11 +234,19 @@ int main(int argc, char** argv) {
     double  total_inf_ms = 0.0;
     auto    loop_start   = Clock::now();
 
-    while (true) {
-        if (is_image) {
+    while (true)
+    {
+        if (is_image)
+        {
             frame = cv::imread(c.input_src);
-            if (frame.empty()) { fprintf(stderr, "[main] Cannot read image.\n"); break; }
-        } else {
+            if (frame.empty())
+            {
+                fprintf(stderr, "[main] Cannot read image.\n");
+                break;
+            }
+        }
+        else
+        {
             if (!cap.read(frame) || frame.empty()) break;
         }
 
@@ -214,7 +265,8 @@ int main(int argc, char** argv) {
         if (is_image) break;
 
         // FPS every 30 frames
-        if (frame_count % 30 == 0) {
+        if (frame_count % 30 == 0)
+        {
             double wall_s = ms_since(loop_start) / 1000.0;
             printf("[fps] inf=%.1f  wall=%.1f\n",
                    frame_count * 1000.0 / (total_inf_ms > 0 ? total_inf_ms : 1),
@@ -225,7 +277,8 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     // Summary
     // -----------------------------------------------------------------------
-    if (frame_count > 0) {
+    if (frame_count > 0)
+    {
         double wall_s = ms_since(loop_start) / 1000.0;
         printf("\n--- Summary (%d frames) ---\n", frame_count);
         printf("  Inf fps  : %.1f\n", frame_count * 1000.0 / (total_inf_ms > 0 ? total_inf_ms : 1));

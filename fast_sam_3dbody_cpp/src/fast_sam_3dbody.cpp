@@ -56,20 +56,23 @@
 #include <unordered_map>
 #include <vector>
 
-namespace fsb {
+namespace fsb
+{
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Timing helper
 // ─────────────────────────────────────────────────────────────────────────────
 using Clock = std::chrono::steady_clock;
-static double ms(Clock::time_point t0) {
+static double ms(Clock::time_point t0)
+{
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GGUF metadata
 // ─────────────────────────────────────────────────────────────────────────────
-struct GGUFMeta {
+struct GGUFMeta
+{
     uint32_t decoder_dim  = 1024;
     uint32_t npose        = 519;
     uint32_t cam_out_dim  = 3;
@@ -80,8 +83,10 @@ struct GGUFMeta {
     float    nms_iou      = 0.45f;
 };
 
-static uint32_t gguf_u32(gguf_context* c, const char* k, uint32_t def=0) {
-    int id = gguf_find_key(c, k); return id>=0 ? gguf_get_val_u32(c, id) : def;
+static uint32_t gguf_u32(gguf_context* c, const char* k, uint32_t def=0)
+{
+    int id = gguf_find_key(c, k);
+    return id>=0 ? gguf_get_val_u32(c, id) : def;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,7 +100,8 @@ static uint32_t gguf_u32(gguf_context* c, const char* k, uint32_t def=0) {
 // Row-major storage: w0[i * in_dim + j] = weight from input j to hidden i.
 // Inference: y = relu(x @ w0.T + b0) @ w1.T + b1
 // ─────────────────────────────────────────────────────────────────────────────
-struct CFFN {
+struct CFFN
+{
     std::vector<float> w0, b0, w1, b1;
     int in_dim=0, hid_dim=0, out_dim=0;
 };
@@ -115,7 +121,8 @@ static bool cffn_load(CFFN& ffn,
 
         // Get shape from the ggml context
         ggml_tensor* t = ggml_get_tensor(wctx, name.c_str());
-        if (!t) {
+        if (!t)
+        {
             fprintf(stderr, "[FFN] tensor not found: %s\n", name.c_str());
             return false;
         }
@@ -126,13 +133,18 @@ static bool cffn_load(CFFN& ffn,
 
         std::fseek(fp, (long)(data_base + off), SEEK_SET);
         out.resize(n);
-        if (type == GGML_TYPE_F32) {
+        if (type == GGML_TYPE_F32)
+        {
             if (std::fread(out.data(), sizeof(float), n, fp) != n) return false;
-        } else if (type == GGML_TYPE_F16) {
+        }
+        else if (type == GGML_TYPE_F16)
+        {
             std::vector<uint16_t> tmp(n);
             if (std::fread(tmp.data(), sizeof(uint16_t), n, fp) != n) return false;
             ggml_fp16_to_fp32_row(tmp.data(), out.data(), (int)n);
-        } else {
+        }
+        else
+        {
             fprintf(stderr, "[FFN] unsupported weight type %d for %s\n", type, name.c_str());
             return false;
         }
@@ -140,7 +152,8 @@ static bool cffn_load(CFFN& ffn,
     };
 
     // Retrieve dimension info from ggml context tensors
-    auto get_tensor = [&](const char* suffix) -> ggml_tensor* {
+    auto get_tensor = [&](const char* suffix) -> ggml_tensor*
+    {
         return ggml_get_tensor(wctx, (prefix + suffix).c_str());
     };
 
@@ -162,8 +175,10 @@ static bool cffn_load(CFFN& ffn,
 static void linear_relu(const float* x, const float* w, const float* b,
                         float* y, int B, int K, int N, bool relu)
 {
-    for (int bi = 0; bi < B; ++bi) {
-        for (int n = 0; n < N; ++n) {
+    for (int bi = 0; bi < B; ++bi)
+    {
+        for (int n = 0; n < N; ++n)
+        {
             float s = b[n];
             const float* xr = x + bi * K;
             const float* wr = w + n * K;
@@ -188,7 +203,8 @@ static std::vector<float> cffn_run(const CFFN& ffn, const float* x, int B)
 // ─────────────────────────────────────────────────────────────────────────────
 // ONNX Runtime session wrapper
 // ─────────────────────────────────────────────────────────────────────────────
-struct OrtSession {
+struct OrtSession
+{
     Ort::Env*             env     = nullptr;
     Ort::Session*         session = nullptr;
     Ort::MemoryInfo       mem_info{ nullptr };
@@ -200,19 +216,23 @@ struct OrtSession {
     {
         // Try with the requested EP first; fall back to CPU if it fails to load
         // (e.g. libcudnn not installed, CUDA EP shared library missing).
-        for (int attempt = 0; attempt < 2; ++attempt) {
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
             bool try_cuda = cuda && (attempt == 0);
             Ort::SessionOptions opts;
             opts.SetIntraOpNumThreads(1);
             opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-            try {
-                if (try_cuda && !trt_ep) {
+            try
+            {
+                if (try_cuda && !trt_ep)
+                {
                     OrtCUDAProviderOptions cp{};
                     cp.device_id = device;
                     opts.AppendExecutionProvider_CUDA(cp);
                 }
 #if defined(USE_TENSORRT_EP)
-                if (try_cuda && trt_ep) {
+                if (try_cuda && trt_ep)
+                {
                     OrtTensorRTProviderOptions tp{};
                     tp.device_id = device;
                     tp.trt_fp16_enable = fp16_io ? 1 : 0;
@@ -224,8 +244,11 @@ struct OrtSession {
                     fprintf(stderr, "[ORT] WARNING: '%s' running on CPU (CUDA EP unavailable)\n",
                             path.c_str());
                 break;  // success
-            } catch (const Ort::Exception& ex) {
-                if (try_cuda) {
+            }
+            catch (const Ort::Exception& ex)
+            {
+                if (try_cuda)
+                {
                     fprintf(stderr, "[ORT] CUDA EP failed (%s)\n[ORT] Retrying '%s' on CPU…\n",
                             ex.what(), path.c_str());
                     continue;  // retry without CUDA
@@ -246,24 +269,24 @@ struct OrtSession {
         output_names.resize(n_out);
         for (size_t i = 0; i < n_in;  ++i)
             input_names_s[i]  = session->GetInputNameAllocated(i,  alloc).get(),
-            input_names[i]    = input_names_s[i].c_str();
+                                input_names[i]    = input_names_s[i].c_str();
         for (size_t i = 0; i < n_out; ++i)
             output_names_s[i] = session->GetOutputNameAllocated(i, alloc).get(),
-            output_names[i]   = output_names_s[i].c_str();
+                                output_names[i]   = output_names_s[i].c_str();
 
         mem_info = Ort::MemoryInfo::CreateCpu(
-            OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
+                       OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
         return true;
     }
 
     // Run with a single float32 input tensor (for backbone)
     std::vector<float> run1(const float* in_data,
-                             const std::vector<int64_t>& in_shape,
-                             size_t out_elems)
+                            const std::vector<int64_t>& in_shape,
+                            size_t out_elems)
     {
         Ort::Value in_t = Ort::Value::CreateTensor<float>(
-            mem_info, const_cast<float*>(in_data), in_shape[0]*in_shape[1]*in_shape[2]*in_shape[3],
-            in_shape.data(), in_shape.size());
+                              mem_info, const_cast<float*>(in_data), in_shape[0]*in_shape[1]*in_shape[2]*in_shape[3],
+                              in_shape.data(), in_shape.size());
         auto out = session->Run(Ort::RunOptions{nullptr},
                                 input_names.data(),  &in_t,    1,
                                 output_names.data(), output_names.size());
@@ -273,13 +296,18 @@ struct OrtSession {
         return result;
     }
 
-    void free() { delete session; session = nullptr; }
+    void free()
+    {
+        delete session;
+        session = nullptr;
+    }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline::Impl
 // ─────────────────────────────────────────────────────────────────────────────
-struct Pipeline::Impl {
+struct Pipeline::Impl
+{
     PipelineConfig  cfg;
     GGUFMeta        meta;
     bool            loaded = false;
@@ -292,41 +320,50 @@ struct Pipeline::Impl {
     CFFN mhr_ffn, cam_ffn;
 
     // ── load ──────────────────────────────────────────────────────────────────
-    bool load(const PipelineConfig& c) {
+    bool load(const PipelineConfig& c)
+    {
         cfg = c;
 
         bool cuda = cfg.cuda_device >= 0;
         int  dev  = cfg.cuda_device;
 
         // ── ONNX sessions ─────────────────────────────────────────────────────
-        auto opath = [&](const char* f) {
+        auto opath = [&](const char* f)
+        {
             return cfg.onnx_dir + "/" + f;
         };
 
-        printf("[FSB] Loading backbone … "); fflush(stdout);
+        printf("[FSB] Loading backbone … ");
+        fflush(stdout);
         if (!sess_backbone.load(ort_env, opath("backbone.onnx"), cuda, dev,
                                 cfg.use_fp16, false))
             return false;
         printf("OK\n");
 
-        printf("[FSB] Loading decoder  … "); fflush(stdout);
+        printf("[FSB] Loading decoder  … ");
+        fflush(stdout);
         if (!sess_decoder.load(ort_env, opath("decoder.onnx"), cuda, dev,
                                cfg.use_fp16, false))
             return false;
         printf("OK\n");
 
-        if (!cfg.skip_body_model) {
+        if (!cfg.skip_body_model)
+        {
             // Prefer body_model.onnx; fall back gracefully to body_model.pt
             // (body_model.pt requires LibTorch – planned via ggml, see TODO below)
             std::string bm_onnx = opath("body_model.onnx");
             std::ifstream bm_check(bm_onnx);
-            if (bm_check.good()) {
+            if (bm_check.good())
+            {
                 bm_check.close();
-                printf("[FSB] Loading body_model.onnx … "); fflush(stdout);
+                printf("[FSB] Loading body_model.onnx … ");
+                fflush(stdout);
                 if (!sess_body.load(ort_env, bm_onnx, cuda, dev, false, false))
                     return false;
                 printf("OK\n");
-            } else {
+            }
+            else
+            {
                 printf("[FSB] body_model.onnx not found; vertex output disabled.\n");
                 printf("[FSB] (body_model.pt exists – ggml implementation planned)\n");
                 // Not a fatal error: vertices / keypoints will be empty in MHRResult
@@ -334,17 +371,23 @@ struct Pipeline::Impl {
         }
 
         // YOLO – optional (might not exist for image-only usage)
-        if (!cfg.yolo_path.empty()) {
-            printf("[FSB] Loading YOLO … "); fflush(stdout);
-            if (!sess_yolo.load(ort_env, cfg.yolo_path, cuda, dev, false, false)) {
+        if (!cfg.yolo_path.empty())
+        {
+            printf("[FSB] Loading YOLO … ");
+            fflush(stdout);
+            if (!sess_yolo.load(ort_env, cfg.yolo_path, cuda, dev, false, false))
+            {
                 fprintf(stderr, "[FSB] YOLO load failed – detection disabled\n");
-            } else {
+            }
+            else
+            {
                 printf("OK\n");
             }
         }
 
         // ── ggml / GGUF ───────────────────────────────────────────────────────
-        printf("[FSB] Loading pipeline.gguf … "); fflush(stdout);
+        printf("[FSB] Loading pipeline.gguf … ");
+        fflush(stdout);
         if (!load_gguf(cfg.gguf_path)) return false;
         printf("OK\n");
 
@@ -352,12 +395,23 @@ struct Pipeline::Impl {
         return true;
     }
 
-    bool load_gguf(const std::string& path) {
+    bool load_gguf(const std::string& path)
+    {
         // Only use gguf for metadata + weight bytes; inference runs in plain C++.
         gguf_context* gctx = nullptr;
         ggml_context* tmp_ctx = nullptr;
-        { struct gguf_init_params p{true, &tmp_ctx}; gctx = gguf_init_from_file(path.c_str(), p); }
-        if (!gctx) { fprintf(stderr, "[FSB] Cannot open GGUF: %s\n", path.c_str()); return false; }
+        {
+            struct gguf_init_params p
+            {
+                true, &tmp_ctx
+            };
+            gctx = gguf_init_from_file(path.c_str(), p);
+        }
+        if (!gctx)
+        {
+            fprintf(stderr, "[FSB] Cannot open GGUF: %s\n", path.c_str());
+            return false;
+        }
 
         meta.decoder_dim   = gguf_u32(gctx, "sam3dbody.decoder_dim", 1024);
         meta.npose         = gguf_u32(gctx, "sam3dbody.npose",        519);
@@ -366,11 +420,16 @@ struct Pipeline::Impl {
         meta.nms_iou       = cfg.person_nms_iou;
 
         FILE* fp = std::fopen(path.c_str(), "rb");
-        if (!fp) { gguf_free(gctx); if (tmp_ctx) ggml_free(tmp_ctx); return false; }
+        if (!fp)
+        {
+            gguf_free(gctx);
+            if (tmp_ctx) ggml_free(tmp_ctx);
+            return false;
+        }
         size_t data_base = gguf_get_data_offset(gctx);
 
         bool ok = cffn_load(mhr_ffn, gctx, tmp_ctx, fp, data_base, "mhr_proj")
-               && cffn_load(cam_ffn, gctx, tmp_ctx, fp, data_base, "cam_proj");
+                  && cffn_load(cam_ffn, gctx, tmp_ctx, fp, data_base, "cam_proj");
 
         std::fclose(fp);
         gguf_free(gctx);
@@ -384,12 +443,14 @@ struct Pipeline::Impl {
     }
 
     // ── process_bgr ───────────────────────────────────────────────────────────
-    std::vector<MHRResult> process_bgr(const uint8_t* bgr, int W, int H) {
+    std::vector<MHRResult> process_bgr(const uint8_t* bgr, int W, int H)
+    {
         cv::Mat img(H, W, CV_8UC3, const_cast<uint8_t*>(bgr));
         return process_mat(img, W, H);
     }
 
-    std::vector<MHRResult> process_mat(const cv::Mat& bgr, int W, int H) {
+    std::vector<MHRResult> process_mat(const cv::Mat& bgr, int W, int H)
+    {
         auto t_total = Clock::now();
 
         // ── camera intrinsics ─────────────────────────────────────────────────
@@ -402,16 +463,19 @@ struct Pipeline::Impl {
         auto t0 = Clock::now();
         std::vector<PersonDet> dets;
 
-        if (sess_yolo.session) {
+        if (sess_yolo.session)
+        {
             // Resize to YOLO input (640×640 is common)
             const int YW = 640, YH = 640;
             cv::Mat yolo_in;
             cv::resize(bgr, yolo_in, {YW, YH});
             // HWC uint8 → CHW float32 [0,1]
             std::vector<float> yolo_buf(3 * YH * YW);
-            for (int y = 0; y < YH; ++y) {
+            for (int y = 0; y < YH; ++y)
+            {
                 const uchar* row = yolo_in.ptr<uchar>(y);
-                for (int x = 0; x < YW; ++x) {
+                for (int x = 0; x < YW; ++x)
+                {
                     yolo_buf[0*YH*YW + y*YW + x] = row[3*x+2] / 255.f; // R
                     yolo_buf[1*YH*YW + y*YW + x] = row[3*x+1] / 255.f; // G
                     yolo_buf[2*YH*YW + y*YW + x] = row[3*x+0] / 255.f; // B
@@ -421,13 +485,14 @@ struct Pipeline::Impl {
             Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
             std::vector<int64_t> in_shape{1, 3, YH, YW};
             Ort::Value in_t = Ort::Value::CreateTensor<float>(
-                mi, yolo_buf.data(), yolo_buf.size(), in_shape.data(), 4);
+                                  mi, yolo_buf.data(), yolo_buf.size(), in_shape.data(), 4);
 
-            try {
+            try
+            {
                 auto outs = sess_yolo.session->Run(
-                    Ort::RunOptions{nullptr},
-                    sess_yolo.input_names.data(),  &in_t,  1,
-                    sess_yolo.output_names.data(), 1);
+                                Ort::RunOptions{nullptr},
+                                sess_yolo.input_names.data(),  &in_t,  1,
+                                sess_yolo.output_names.data(), 1);
 
                 auto info   = outs[0].GetTensorTypeAndShapeInfo();
                 auto shape  = info.GetShape();
@@ -437,15 +502,19 @@ struct Pipeline::Impl {
                 const float* raw = outs[0].GetTensorData<float>();
                 std::vector<float> row_major;
 
-                if (shape.size() == 3) {
-                    if (shape[1] == 56) {
+                if (shape.size() == 3)
+                {
+                    if (shape[1] == 56)
+                    {
                         // [1, 56, num_dets] → need transpose
                         nd = (int)shape[2];
                         row_major.resize(nd * 56);
                         for (int j = 0; j < nd; ++j)
                             for (int k = 0; k < 56; ++k)
                                 row_major[j*56+k] = raw[k*nd + j];
-                    } else {
+                    }
+                    else
+                    {
                         // [1, num_dets, 56]
                         nd = (int)shape[1];
                         row_major.assign(raw, raw + nd * 56);
@@ -455,23 +524,31 @@ struct Pipeline::Impl {
                 float sx = float(W) / YW, sy = float(H) / YH;
                 dets = parse_yolo_output(row_major.data(), nd,
                                          cfg.person_thresh, cfg.person_nms_iou);
-                for (auto& d : dets) {
-                    d.x1 *= sx; d.x2 *= sx;
-                    d.y1 *= sy; d.y2 *= sy;
-                    if (d.has_kps) {
-                        for (int k = 0; k < 17; ++k) {
+                for (auto& d : dets)
+                {
+                    d.x1 *= sx;
+                    d.x2 *= sx;
+                    d.y1 *= sy;
+                    d.y2 *= sy;
+                    if (d.has_kps)
+                    {
+                        for (int k = 0; k < 17; ++k)
+                        {
                             d.kps[k*3 + 0] *= sx;
                             d.kps[k*3 + 1] *= sy;
                         }
                     }
                 }
-            } catch (const Ort::Exception& e) {
+            }
+            catch (const Ort::Exception& e)
+            {
                 fprintf(stderr, "[FSB] YOLO inference error: %s\n", e.what());
             }
         }
 
         // Fallback: full image as single detection
-        if (dets.empty()) {
+        if (dets.empty())
+        {
             dets.push_back({ 0.f, 0.f, float(W), float(H), 1.f });
         }
         // Apply max_persons cap (sorted by confidence from NMS)
@@ -491,7 +568,8 @@ struct Pipeline::Impl {
         std::vector<float> crop_cx_v(B), crop_cy_v(B), crop_sz_v(B);
 
         t0 = Clock::now();
-        for (int i = 0; i < B; ++i) {
+        for (int i = 0; i < B; ++i)
+        {
             const auto& d = dets[i];
             float* img_ptr = batch_crops.data() + i * 3 * plane;
             float& ccx     = crop_cx_v[i];
@@ -519,11 +597,11 @@ struct Pipeline::Impl {
         Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         Ort::Value img_t = Ort::Value::CreateTensor<float>(
-            mi, batch_crops.data(), batch_crops.size(), img_shape.data(), 4);
+                               mi, batch_crops.data(), batch_crops.size(), img_shape.data(), 4);
         auto backbone_out = sess_backbone.session->Run(
-            Ort::RunOptions{nullptr},
-            sess_backbone.input_names.data(),  &img_t,  1,
-            sess_backbone.output_names.data(), 1);
+                                Ort::RunOptions{nullptr},
+                                sess_backbone.input_names.data(),  &img_t,  1,
+                                sess_backbone.output_names.data(), 1);
         const float* feat_ptr = backbone_out[0].GetTensorData<float>();
         std::vector<float> features(feat_ptr, feat_ptr + feat_elems);
         printf("[FSB] backbone:   %.1f ms\n", ms(t0));
@@ -538,11 +616,11 @@ struct Pipeline::Impl {
         std::vector<int64_t> ray_shape {B, 2, FEAT_HW, FEAT_HW};
 
         Ort::Value feat_t = Ort::Value::CreateTensor<float>(
-            mi, features.data(), features.size(), feat_shape.data(), 4);
+                                mi, features.data(), features.size(), feat_shape.data(), 4);
         Ort::Value cond_t = Ort::Value::CreateTensor<float>(
-            mi, batch_cond.data(), batch_cond.size(), cond_shape.data(), 2);
+                                mi, batch_cond.data(), batch_cond.size(), cond_shape.data(), 2);
         Ort::Value ray_t  = Ort::Value::CreateTensor<float>(
-            mi, batch_ray.data(), batch_ray.size(), ray_shape.data(), 4);
+                                mi, batch_ray.data(), batch_ray.size(), ray_shape.data(), 4);
 
         std::vector<Ort::Value> dec_inputs;
         dec_inputs.push_back(std::move(feat_t));
@@ -553,9 +631,9 @@ struct Pipeline::Impl {
         std::vector<const char*>& dec_out_names = sess_decoder.output_names;
 
         auto decoder_out = sess_decoder.session->Run(
-            Ort::RunOptions{nullptr},
-            dec_in_names.data(),  dec_inputs.data(),  dec_inputs.size(),
-            dec_out_names.data(), 1);
+                               Ort::RunOptions{nullptr},
+                               dec_in_names.data(),  dec_inputs.data(),  dec_inputs.size(),
+                               dec_out_names.data(), 1);
         const float* token_ptr = decoder_out[0].GetTensorData<float>();
         std::vector<float> pose_tokens(token_ptr, token_ptr + token_elems);
         printf("[FSB] decoder:    %.1f ms\n", ms(t0));
@@ -568,7 +646,8 @@ struct Pipeline::Impl {
 
         // ── body model (optional) ─────────────────────────────────────────────
         std::vector<float> all_verts, all_skel;
-        if (!cfg.skip_body_model && sess_body.session) {
+        if (!cfg.skip_body_model && sess_body.session)
+        {
             t0 = Clock::now();
             // Build per-person body model inputs
             const int NPOSE = (int)meta.npose;
@@ -576,7 +655,8 @@ struct Pipeline::Impl {
             std::vector<float> batch_bparams(B * 204, 0.f);
             std::vector<float> batch_face   (B * 72,  0.f);
 
-            for (int i = 0; i < B; ++i) {
+            for (int i = 0; i < B; ++i)
+            {
                 const float* raw_i = mhr_raw.data() + i * NPOSE;
                 // Parse: global_rot_6d[6] + body_cont[260] + shape[45] + scale[28] + hand[108] + face[72]
                 const float* global_rot_6d  = raw_i;
@@ -613,7 +693,7 @@ struct Pipeline::Impl {
             bool corr_val = false;
             std::vector<int64_t> scalar_sh{};
             Ort::Value corr_t = Ort::Value::CreateTensor<bool>(mi, &corr_val, 1,
-                                                                scalar_sh.data(), 0);
+                                scalar_sh.data(), 0);
 
             std::vector<Ort::Value> body_ins;
             body_ins.push_back(std::move(shape_t));
@@ -622,9 +702,9 @@ struct Pipeline::Impl {
             body_ins.push_back(std::move(corr_t));
 
             auto body_out = sess_body.session->Run(
-                Ort::RunOptions{nullptr},
-                sess_body.input_names.data(),  body_ins.data(),  4,
-                sess_body.output_names.data(), 2);
+                                Ort::RunOptions{nullptr},
+                                sess_body.input_names.data(),  body_ins.data(),  4,
+                                sess_body.output_names.data(), 2);
 
             const float* vp = body_out[0].GetTensorData<float>();
             const float* sp = body_out[1].GetTensorData<float>();
@@ -639,7 +719,8 @@ struct Pipeline::Impl {
         std::vector<MHRResult> results(B);
         const int NPOSE = (int)meta.npose;
 
-        for (int i = 0; i < B; ++i) {
+        for (int i = 0; i < B; ++i)
+        {
             MHRResult& r   = results[i];
             const auto& d  = dets[i];
             const float* p = mhr_raw.data() + i * NPOSE;
@@ -690,12 +771,14 @@ struct Pipeline::Impl {
                 r.keypoints_yolo.assign(d.kps, d.kps + 51);
 
             // Vertices (optional)
-            if (!all_verts.empty()) {
+            if (!all_verts.empty())
+            {
                 size_t off = (size_t)i * 18439 * 3;
                 r.pred_vertices.assign(all_verts.begin() + off,
                                        all_verts.begin() + off + 18439*3);
                 // Flip y,z to match camera system (matches Python code: [1,2] *= -1)
-                for (size_t k = 0; k < 18439; ++k) {
+                for (size_t k = 0; k < 18439; ++k)
+                {
                     r.pred_vertices[k*3 + 1] *= -1.f;
                     r.pred_vertices[k*3 + 2] *= -1.f;
                 }
@@ -706,7 +789,8 @@ struct Pipeline::Impl {
         return results;
     }
 
-    void free_all() {
+    void free_all()
+    {
         // CFFN weights are plain vectors – cleaned up automatically
         mhr_ffn = CFFN{};
         cam_ffn = CFFN{};
@@ -722,19 +806,31 @@ struct Pipeline::Impl {
 // Pipeline  (public interface)
 // ─────────────────────────────────────────────────────────────────────────────
 Pipeline::Pipeline()  : impl_(new Impl) {}
-Pipeline::~Pipeline() { free(); delete impl_; }
+Pipeline::~Pipeline()
+{
+    free();
+    delete impl_;
+}
 
-bool Pipeline::load(const PipelineConfig& cfg) {
+bool Pipeline::load(const PipelineConfig& cfg)
+{
     return impl_->load(cfg);
 }
-void Pipeline::free() {
+void Pipeline::free()
+{
     if (impl_) impl_->free_all();
 }
-bool Pipeline::is_loaded() const {
+bool Pipeline::is_loaded() const
+{
     return impl_ && impl_->loaded;
 }
-void Pipeline::print_info() const {
-    if (!impl_ || !impl_->loaded) { printf("[FSB] not loaded\n"); return; }
+void Pipeline::print_info() const
+{
+    if (!impl_ || !impl_->loaded)
+    {
+        printf("[FSB] not loaded\n");
+        return;
+    }
     const auto& m = impl_->meta;
     printf("\n=== fast_sam_3dbody ===\n");
     printf("  decoder_dim : %u\n", m.decoder_dim);
@@ -744,7 +840,8 @@ void Pipeline::print_info() const {
     printf("  default_f   : %.0f\n", m.default_focal);
     printf("=======================\n\n");
 }
-std::vector<MHRResult> Pipeline::process_bgr(const uint8_t* bgr, int w, int h) {
+std::vector<MHRResult> Pipeline::process_bgr(const uint8_t* bgr, int w, int h)
+{
     return impl_->process_bgr(bgr, w, h);
 }
 
