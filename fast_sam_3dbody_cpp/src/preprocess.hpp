@@ -320,8 +320,6 @@ inline void compact_cont_to_body_params(
 //   body_params[204]  = full_pose_params [136] + scales [68]
 //   face       [72]
 //
-// full_pose_params [136] = global_rot[3] + global_trans[3] + body_pose[133] - 3 ???
-//
 // Actually: the MHR model is called with (shape_params, model_params, expr_params).
 // model_params=[204] = cat([full_pose_params, scales], dim=1)
 // where full_pose_params=[136] = global_trans[3]+global_rot_euler[3]+body_pose[133]???
@@ -333,6 +331,24 @@ inline void compact_cont_to_body_params(
 //
 // For inference we zero-fill scales and set full_pose_params from predictions.
 // Caller uses build_model_params_from_prediction() below.
+//
+// BUG (2026-04-27): The correct layout from the Python reference code
+// (mhr_head.py _mhr_forward_core line 574-576) is:
+//   full_pose_params = torch.cat([global_trans * 10, global_rot, body_pose_params], dim=1)
+//   model_params     = torch.cat([full_pose_params, scales], dim=1)
+// So model_params layout is:
+//   [0:3]   = global_trans (scaled by 10, zeroed in single-view)
+//   [3:6]   = global_rot_euler
+//   [6:136] = body_pose_params (first 130 of 133 joints)
+//   [136:204] = scales (zeroed)
+// The current C++ implementation below puts global_rot at [0:2] and body_pose at [3:135],
+// which is WRONG — it shifts everything by 3 positions into the wrong PT matrix columns.
+// This causes garbage joint parameters and a deformed mesh.
+//
+// Additionally, hand joints should be zeroed (mhr_head.py line 433):
+//   pred_pose_euler[:, mhr_param_hand_idxs] = 0
+// And global_trans is zeroed (mhr_head.py line 427):
+//   global_trans = torch.zeros_like(global_rot_euler)
 struct ModelParams204 {
     float data[204] = {};
 };
@@ -347,18 +363,40 @@ inline ModelParams204 build_model_params(
 )
 {
     ModelParams204 out{};
-    // Layout inferred from _mhr_forward_core:
-    //   full_pose_params = cat([body_pose_euler[B,133], hands[B,0], global_rot[B,3],
-    //                           global_trans[B,3], ...], dim=1)
-    // Exact layout: global_trans[3] + global_rot[3] + body_pose[130+3=133] = 139???
-    // We use the safe default: first 3 = global_rot, next 133 = body_pose, rest = 0
-    // This matches the torch.jit contract assumed by the body_model ONNX.
-    out.data[0] = global_rot_euler[0];
-    out.data[1] = global_rot_euler[1];
-    out.data[2] = global_rot_euler[2];
-    // body_pose occupies indices 3..135
-    std::memcpy(out.data + 3, body_euler, 133 * sizeof(float));
-    // scale part (indices 136..203) – zeroed (zero_scales)
+    // Layout from Python reference (mhr_head.py _mhr_forward_core line 574-584):
+    //   full_pose_params = torch.cat([global_trans * 10, global_rot, body_pose_params], dim=1)
+    //   model_params     = torch.cat([full_pose_params, scales], dim=1)
+    //
+    // Correct layout:
+    //   [0:3]   = global_trans (scaled by 10, zeroed in single-view)
+    //   [3:6]   = global_rot_euler
+    //   [6:136] = body_pose_params (first 130 of 133 joints, hand joints zeroed)
+    //   [136:204] = scales (zeroed)
+
+    // [0:3] = global_trans (zeroed for single-view)
+    out.data[0] = 0.0f;
+    out.data[1] = 0.0f;
+    out.data[2] = 0.0f;
+
+    // [3:6] = global_rot_euler
+    out.data[3] = global_rot_euler[0];
+    out.data[4] = global_rot_euler[1];
+    out.data[5] = global_rot_euler[2];
+
+    // [6:136] = body_pose_params (first 130 of 133 joints)
+    // Python code uses body_pose_params[..., :130] (line 568 of mhr_head.py)
+    // This copies 130 floats from body_euler into [6:136]
+    std::memcpy(out.data + 6, body_euler, 130 * sizeof(float));
+
+    // Zero hand joint params (indices 62-115 in the 133-dim body_pose)
+    // In model_params these become indices 68-121 (6 + 62 to 6 + 115)
+    // Python code: pred_pose_euler[:, mhr_param_hand_idxs] = 0
+    // mhr_param_hand_idxs = [62..115]
+    for (int i = 68; i <= 121; ++i)
+        out.data[i] = 0.0f;
+
+    // [136:204] = scales (zeroed)
+    // Already zeroed by default initialization
     (void)scale_params; (void)zero_scales;
     return out;
 }

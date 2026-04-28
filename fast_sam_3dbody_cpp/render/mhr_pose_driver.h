@@ -70,11 +70,16 @@ static inline void mhr_camera_matrices(float       out_proj[16],
     out_proj[ 2] = 0.0f;  out_proj[ 6] = 0.0f; out_proj[10] = p22;   out_proj[14] = p32;
     out_proj[ 3] = 0.0f;  out_proj[ 7] = 0.0f; out_proj[11] = -1.0f; out_proj[15] = 0.0f;
 
-    // View: identity rotation, translate by pred_cam_t.
+    // View: identity rotation, translate by -pred_cam_t (X,Y).
+    // The Python reference does verts + pred_cam_t to position the mesh.
+    // In OpenGL, the view matrix moves the world — to achieve the same
+    // screen-space position, we negate the translation.
+    // Z is kept as-is because the LBS YZ-flip already inverts the
+    // camera-depth convention (body model +Z_cam → flipped -Z_opengl).
     out_view[ 0] = 1.0f;            out_view[ 4] = 0.0f;
-    out_view[ 8] = 0.0f;            out_view[12] = pred_cam_t[0];
+    out_view[ 8] = 0.0f;            out_view[12] = -pred_cam_t[0];
     out_view[ 1] = 0.0f;            out_view[ 5] = 1.0f;
-    out_view[ 9] = 0.0f;            out_view[13] = pred_cam_t[1];
+    out_view[ 9] = 0.0f;            out_view[13] = -pred_cam_t[1];
     out_view[ 2] = 0.0f;            out_view[ 6] = 0.0f;
     out_view[10] = 1.0f;            out_view[14] = pred_cam_t[2];
     out_view[ 3] = 0.0f;            out_view[ 7] = 0.0f;

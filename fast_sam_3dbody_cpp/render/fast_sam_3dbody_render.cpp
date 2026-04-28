@@ -459,6 +459,18 @@ int main(int argc, const char** argv) {
                             r.face_params.data(),
                             lbs_out.data());
             mhr_update_mesh_vertices(tri_model, lbs_out.data());
+
+            // Debug: print vertex bounds in model space
+            { float xmin=1e9f,xmax=-1e9f,ymin=1e9f,ymax=-1e9f,zmin=1e9f,zmax=-1e9f;
+              for (int i=0; i<MHR_VERTEX_FLOATS; i+=3) {
+                  if (lbs_out[i]<xmin) xmin=lbs_out[i]; if (lbs_out[i]>xmax) xmax=lbs_out[i];
+                  if (lbs_out[i+1]<ymin) ymin=lbs_out[i+1]; if (lbs_out[i+1]>ymax) ymax=lbs_out[i+1];
+                  if (lbs_out[i+2]<zmin) zmin=lbs_out[i+2]; if (lbs_out[i+2]>zmax) zmax=lbs_out[i+2];
+              }
+              printf("[mesh] model bounds: x[%.3f,%.3f] y[%.3f,%.3f] z[%.3f,%.3f]\n",
+                     xmin,xmax, ymin,ymax, zmin,zmax);
+            }
+
             glBindBuffer(GL_ARRAY_BUFFER, mesh_gpu.vbo_pos);
             glBufferSubData(GL_ARRAY_BUFFER, 0,
                             MHR_VERTEX_FLOATS * sizeof(float),
@@ -481,11 +493,43 @@ int main(int argc, const char** argv) {
             mat4_print("View",view);
             mat4_print("MVP",mvp);
 
+            // Debug: view-space and clip-space bounds
+            { float vxmin=1e9f,vxmax=-1e9f,vymin=1e9f,vymax=-1e9f,vzmin=1e9f,vzmax=-1e9f;
+              float cxmin=1e9f,cxmax=-1e9f,cymin=1e9f,cymax=-1e9f,czmin=1e9f,czmax=-1e9f,cwmin=1e9f,cwmax=-1e9f;
+              for (int i=0; i<MHR_VERTEX_FLOATS; i+=3) {
+                  // View space
+                  float vx = lbs_out[i]   + view[12];
+                  float vy = lbs_out[i+1] + view[13];
+                  float vz = lbs_out[i+2] + view[14];
+                  if(vx<vxmin)vxmin=vx; if(vx>vxmax)vxmax=vx;
+                  if(vy<vymin)vymin=vy; if(vy>vymax)vymax=vy;
+                  if(vz<vzmin)vzmin=vz; if(vz>vzmax)vzmax=vz;
+                  // Clip space (MVP * vertex)
+                  float wx = mvp[0]*lbs_out[i]   + mvp[4]*lbs_out[i+1] + mvp[8]*lbs_out[i+2] + mvp[12];
+                  float wy = mvp[1]*lbs_out[i]   + mvp[5]*lbs_out[i+1] + mvp[9]*lbs_out[i+2] + mvp[13];
+                  float wz = mvp[2]*lbs_out[i]   + mvp[6]*lbs_out[i+1] + mvp[10]*lbs_out[i+2]+ mvp[14];
+                  float ww = mvp[3]*lbs_out[i]   + mvp[7]*lbs_out[i+1] + mvp[11]*lbs_out[i+2]+ mvp[15];
+                  if(wx<cxmin)cxmin=wx; if(wx>cxmax)cxmax=wx;
+                  if(wy<cymin)cymin=wy; if(wy>cymax)cymax=wy;
+                  if(wz<czmin)czmin=wz; if(wz>czmax)czmax=wz;
+                  if(ww<cwmin)cwmin=ww; if(ww>cwmax)cwmax=ww;
+              }
+              printf("[mesh] view bounds: x[%.3f,%.3f] y[%.3f,%.3f] z[%.3f,%.3f]\n", vxmin,vxmax, vymin,vymax, vzmin,vzmax);
+              printf("[mesh] clip w=[%.3f,%.3f]  ndcX=[%.3f,%.3f]  ndcY=[%.3f,%.3f]  ndcZ=[%.3f,%.3f]\n",
+                     cwmin,cwmax,
+                     cxmin/cwmax, cxmax/cwmin, // worst-case NDC
+                     cymin/cwmax, cymax/cwmin,
+                     czmin/cwmax, czmax/cwmin);
+            }
+
             glUniformMatrix4fv(mvp_loc, 1, GL_FALSE, mvp);
 
             glBindVertexArray(mesh_gpu.vao);
             glDrawElements(GL_TRIANGLES, mesh_gpu.n_indices,
                            GL_UNSIGNED_INT, nullptr);
+            GLenum err = glGetError();
+            if (err != GL_NO_ERROR)
+                fprintf(stderr, "[GL] error 0x%04X after draw\n", err);
         }
         glBindVertexArray(0);
 
