@@ -497,10 +497,10 @@ int main(int argc, const char** argv) {
             { float vxmin=1e9f,vxmax=-1e9f,vymin=1e9f,vymax=-1e9f,vzmin=1e9f,vzmax=-1e9f;
               float cxmin=1e9f,cxmax=-1e9f,cymin=1e9f,cymax=-1e9f,czmin=1e9f,czmax=-1e9f,cwmin=1e9f,cwmax=-1e9f;
               for (int i=0; i<MHR_VERTEX_FLOATS; i+=3) {
-                  // View space
-                  float vx = lbs_out[i]   + view[12];
-                  float vy = lbs_out[i+1] + view[13];
-                  float vz = lbs_out[i+2] + view[14];
+                  // View space: apply full view matrix (diagonal -1 for Y,Z + translation)
+                  float vx =  lbs_out[i]   + view[12];
+                  float vy = -lbs_out[i+1] + view[13];
+                  float vz = -lbs_out[i+2] + view[14];
                   if(vx<vxmin)vxmin=vx; if(vx>vxmax)vxmax=vx;
                   if(vy<vymin)vymin=vy; if(vy>vymax)vymax=vy;
                   if(vz<vzmin)vzmin=vz; if(vz>vzmax)vzmax=vz;

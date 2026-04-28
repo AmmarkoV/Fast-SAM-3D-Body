@@ -727,9 +727,23 @@ struct Pipeline::Impl
 
             r.bbox = { d.x1, d.y1, d.x2, d.y2 };
 
-            // Camera
+            // Camera: convert raw head output [s, tx, ty] → [tx+cx, ty+cy, tz]
+            // Mirrors Python cam_raw_to_pred_cam_t in fast_sam_3dbody_frontend-3D.py
             const float* cam = cam_raw.data() + i * 3;
-            r.pred_cam_t = { cam[0], cam[1], cam[2] };
+            {
+                float s_val   = -cam[0];           // sign flip (Python: s = -pred_cam[:,0])
+                float tx      =  cam[1];
+                float ty      = -cam[2];           // sign flip (Python: ty = -pred_cam[:,2])
+                float bw      = d.x2 - d.x1;
+                float bh      = d.y2 - d.y1;
+                float bbox_cx = (d.x1 + d.x2) * 0.5f;
+                float bbox_cy = (d.y1 + d.y2) * 0.5f;
+                float bs      = std::max(bw, bh) * 1.25f * s_val + 1e-8f;
+                float tz      = 2.0f * fx / bs;
+                float cx_off  = 2.0f * (bbox_cx - cx) / bs;
+                float cy_off  = 2.0f * (bbox_cy - cy) / bs;
+                r.pred_cam_t  = { tx + cx_off, ty + cy_off, tz };
+            }
             r.focal_length = fx;
 
             // Global rotation 6D → Euler
