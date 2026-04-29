@@ -405,10 +405,14 @@ inline ModelParams204 build_model_params(
     out.data[1] = 0.0f;
     out.data[2] = 0.0f;
 
-    // [3:6] = global_rot_euler
-    out.data[3] = global_rot_euler[0];
-    out.data[4] = global_rot_euler[1];
-    out.data[5] = global_rot_euler[2];
+    // [3:6] = global_rot in the ZYX order that Python stores via roma.rotmat_to_euler("ZYX"):
+    //   roma.rotmat_to_euler("ZYX", R) → [rz, ry, rx]  (Z angle first, X angle last)
+    //   rot6d_to_euler (C)             → [rx, ry, rz]  (X angle first — matches batchXYZfrom6D)
+    // The PT matrix was trained with Python's [rz, ry, rx] layout, so we swap [0]↔[2].
+    // Body-pose joints are NOT swapped: batchXYZfrom6D and rot6d_to_euler both use [rx,ry,rz].
+    out.data[3] = global_rot_euler[2];  // rz  (Z angle)
+    out.data[4] = global_rot_euler[1];  // ry  (Y angle)
+    out.data[5] = global_rot_euler[0];  // rx  (X angle)
 
     // [6:136] = body_pose_params (first 130 of 133 joints)
     // Python code uses body_pose_params[..., :130] (line 568 of mhr_head.py)

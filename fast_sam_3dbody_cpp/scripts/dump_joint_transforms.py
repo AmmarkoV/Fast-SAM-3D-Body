@@ -429,9 +429,14 @@ def main():
         model_params = np.zeros(204, dtype=np.float32)
         rest = np.array([])
 
+    # model_params[3:6] stores global rotation in roma "ZYX" order: [rz, ry, rx]
+    # (Python: roma.rotmat_to_euler("ZYX", R) → first element is Z angle)
+    # C: rot6d_to_euler returns [rx, ry, rz]; build_model_params swaps [0]↔[2] to match.
+    rz_g, ry_g, rx_g = model_params[3], model_params[4], model_params[5]
     print(f"  model_params[0:6] = {model_params[:6]}  (global_trans*10, global_rot ZYX)")
-    print(f"  model_params[3:6] = {model_params[3:6]}  (global_rot rx={np.degrees(model_params[3]):.1f}° "
-          f"ry={np.degrees(model_params[4]):.1f}° rz={np.degrees(model_params[5]):.1f}°)")
+    print(f"  model_params[3:6] = [{rz_g:.5f}, {ry_g:.5f}, {rx_g:.5f}]  "
+          f"→ rz={np.degrees(rz_g):.1f}° ry={np.degrees(ry_g):.1f}° rx={np.degrees(rx_g):.1f}°  "
+          f"(stored ZYX order: [rz, ry, rx])")
 
     # Split rest into shape and face coeffs (sizes from lbs)
     ns = lbs["n_shape_pc"]
