@@ -242,32 +242,59 @@ inline std::vector<PersonDet> parse_yolo_output(
 // Output 133 = 23×3 (euler 3-dof) + 58 (euler 1-dof) + 6 (trans) = 87 + 46 + ... hmm
 //   Actually 23*3 = 69 + 58 + 6 = 133  ✓
 
-// 6D rotation → 3D Euler ZYX (batchXYZfrom6D in Python)
+// 6D rotation → 3D ZYX Euler angles (rx, ry, rz).
+//
+// Matches Python batchXYZfrom6D (mhr_utils.py) which:
+//   1. Treats d6[0:3] as first COLUMN candidate, d6[3:6] as second COLUMN candidate.
+//   2. Gram-Schmidt orthonormalises them → columns c0, c1.
+//   3. c2 = c0 × c1 (right-hand frame).
+//   4. Extracts ZYX Euler from the BOTTOM ROW and LEFT COLUMN of the matrix:
+//        rx = atan2(R[2,1], R[2,2])
+//        ry = asin(-R[2,0])
+//        rz = atan2(R[1,0], R[0,0])
+//
+// Variable naming: eXY = element at row X of column Y of R.
+//   col 0 → [e00, e01, e02] = [R[0,0], R[1,0], R[2,0]]
+//   col 1 → [e10, e11, e12] = [R[0,1], R[1,1], R[2,1]]
+//   col 2 → [e20, e21, e22] = [R[0,2], R[1,2], R[2,2]]
+//
+// ZYX extraction uses: R[2,0]=e02, R[2,1]=e12, R[2,2]=e22, R[1,0]=e01, R[0,0]=e00.
+// (A previous bug used e20/e21/e10, which are the TRANSPOSED positions and extract
+//  the angles for R^T = inverse rotation — all joints bent the wrong way.)
 static inline void rot6d_to_euler(const float* d6, float* euler) {
-    // Gram–Schmidt to orthonormal frame
+    // ── Step 1: build column 0 (first 3 floats, normalised) ──────────────────
     float a0 = d6[0], a1 = d6[1], a2 = d6[2];
     float b0 = d6[3], b1 = d6[4], b2 = d6[5];
 
     float na  = std::sqrt(a0*a0 + a1*a1 + a2*a2) + 1e-8f;
-    float e00 = a0/na, e01 = a1/na, e02 = a2/na;  // first col
+    // col 0:  e00=R[0,0]  e01=R[1,0]  e02=R[2,0]
+    float e00 = a0/na, e01 = a1/na, e02 = a2/na;
+
+    // ── Step 2: Gram-Schmidt → column 1 ──────────────────────────────────────
     float dot = e00*b0 + e01*b1 + e02*b2;
+    // col 1:  e10=R[0,1]  e11=R[1,1]  e12=R[2,1]
     float e10 = b0 - dot*e00;
     float e11 = b1 - dot*e01;
     float e12 = b2 - dot*e02;
     float nb  = std::sqrt(e10*e10 + e11*e11 + e12*e12) + 1e-8f;
     e10 /= nb; e11 /= nb; e12 /= nb;
-    // third col = cross
-    float e20 = e01*e12 - e02*e11;
-    float e21 = e02*e10 - e00*e12;
-    float e22 = e00*e11 - e01*e10;
 
-    // Rotation matrix rows:
-    //  R = [[e00,e10,e20],[e01,e11,e21],[e02,e12,e22]]
-    // ZYX Euler: Ry = asin(-R[2,0]), Rx = atan2(R[2,1],R[2,2]), Rz = atan2(R[1,0],R[0,0])
-    // (Python uses XYZ convention here – adjust as needed)
-    euler[0] = std::atan2(e21, e22);  // rx
-    euler[1] = std::asin(std::max(-1.f, std::min(1.f, -e20)));  // ry
-    euler[2] = std::atan2(e10, e00);  // rz
+    // ── Step 3: cross product → column 2 (not needed for angle extraction) ───
+    // col 2:  e20=R[0,2]  e21=R[1,2]  e22=R[2,2]
+    // e20 = e01*e12 - e02*e11   (unused in extraction)
+    // e21 = e02*e10 - e00*e12   (unused in extraction)
+    float e22 = e00*e11 - e01*e10;   // R[2,2] = cos(ry)*cos(rx)
+
+    // ── Step 4: ZYX Euler extraction from bottom row and left column ─────────
+    // For R = Rz(rz)*Ry(ry)*Rx(rx):
+    //   R[2,0] = -sin(ry)                       → e02
+    //   R[2,1] =  cos(ry)*sin(rx)               → e12
+    //   R[2,2] =  cos(ry)*cos(rx)               → e22
+    //   R[1,0] =  sin(rz)*cos(ry)               → e01
+    //   R[0,0] =  cos(rz)*cos(ry)               → e00
+    euler[0] = std::atan2(e12, e22);  // rx = atan2(R[2,1], R[2,2])
+    euler[1] = std::asin(std::max(-1.f, std::min(1.f, -e02)));  // ry = asin(-R[2,0])
+    euler[2] = std::atan2(e01, e00);  // rz = atan2(R[1,0], R[0,0])
 }
 
 // 3-DOF joint index layout in the 133-param vector

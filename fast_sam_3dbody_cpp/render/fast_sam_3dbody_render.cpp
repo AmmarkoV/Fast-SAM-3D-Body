@@ -94,7 +94,8 @@ static GLuint compile_shader(GLenum type, const char* src) {
     return s;
 }
 
-static GLuint link_program(const char* vs, const char* fs) {
+static GLuint link_program(const char* vs, const char* fs) 
+{
     GLuint p = glCreateProgram();
     GLuint v = compile_shader(GL_VERTEX_SHADER,   vs);
     GLuint f = compile_shader(GL_FRAGMENT_SHADER, fs);
@@ -111,12 +112,14 @@ static GLuint link_program(const char* vs, const char* fs) {
 
 // ── GPU mesh state ───────────────────────────────────────────────────────────
 
-struct MeshGPU {
+struct MeshGPU 
+{
     GLuint vao, vbo_pos, vbo_norm, ebo;
     GLsizei n_indices;
 };
 
-static MeshGPU upload_mesh_once(const struct TRI_Model* m) {
+static MeshGPU upload_mesh_once(const struct TRI_Model* m) 
+{
     MeshGPU g{};
     g.n_indices = (GLsizei)m->header.numberOfIndices;
 
@@ -156,7 +159,8 @@ static MeshGPU upload_mesh_once(const struct TRI_Model* m) {
 
 struct BgTex { GLuint id; int w, h; bool ready; };
 
-static BgTex create_bg_tex() {
+static BgTex create_bg_tex() 
+{
     BgTex t{0, 0, 0, false};
     glGenTextures(1, &t.id);
     glBindTexture(GL_TEXTURE_2D, t.id);
@@ -169,7 +173,8 @@ static BgTex create_bg_tex() {
 }
 
 // Upload a BGR frame. Converts to RGB so the sampler returns correct colours.
-static void upload_bg_frame(BgTex& t, const cv::Mat& bgr) {
+static void upload_bg_frame(BgTex& t, const cv::Mat& bgr) 
+{
     cv::Mat rgb;
     cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
     glBindTexture(GL_TEXTURE_2D, t.id);
@@ -188,7 +193,8 @@ static void upload_bg_frame(BgTex& t, const cv::Mat& bgr) {
 
 // ── 4x4 matrix multiply (column-major) ──────────────────────────────────────
 
-static void mat4_mul(float dst[16], const float a[16], const float b[16]) {
+static void mat4_mul(float dst[16], const float a[16], const float b[16]) 
+{
     for (int c = 0; c < 4; ++c)
         for (int r = 0; r < 4; ++r) 
         {
@@ -239,7 +245,8 @@ int mat4_transpose(float * mat)
 }
 // ── Callbacks required by glx3.c ─────────────────────────────────────────────
 
-extern "C" {
+extern "C" 
+{
     // Called by glx3_checkEvents() on key/mouse events.
     int handleUserInput(int key, int x, int y) { (void)key; (void)x; (void)y; return 1; }
     // Called by glx3_checkEvents() when the window is resized.
