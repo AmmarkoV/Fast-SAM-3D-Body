@@ -52,7 +52,7 @@ class FsbResult(ctypes.Structure):
     _fields_ = [
         ("bbox",         ctypes.c_float * 4),
         ("focal_length", ctypes.c_float),
-        ("pred_cam_t",   ctypes.c_float * 3),   # raw camera head output [s, tx, ty]
+        ("pred_cam_t",   ctypes.c_float * 3),   # camera translation [tx, ty, tz] in camera space
         ("global_rot",   ctypes.c_float * 3),
         ("body_pose",    ctypes.c_float * 133),
         ("shape",        ctypes.c_float * 45),
@@ -92,40 +92,6 @@ def load_library(lib_dir: str) -> ctypes.CDLL:
         ctypes.c_int,
     ]
     return lib
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Camera conversion: raw camera head output [s, tx, ty] → [tx, ty, tz]
-# Mirrors PerspectiveHead.perspective_projection in sam3d_body.
-# ──────────────────────────────────────────────────────────────────────────────
-
-def cam_raw_to_pred_cam_t(cam_raw, bbox, focal_length, img_w, img_h,
-                           principal_x=0.0, principal_y=0.0):
-    """
-    cam_raw: [s, tx, ty] – direct output of camera head FFN
-    bbox: [x1, y1, x2, y2] in original image pixels
-    Returns pred_cam_t [tx, ty, tz] in camera space (metres).
-    """
-    s  = -cam_raw[0]    # sign flip (matches Python: s = -pred_cam[:, 0])
-    tx =  cam_raw[1]
-    ty = -cam_raw[2]    # sign flip (matches Python: ty = -pred_cam[:, 2])
-
-    bw = bbox[2] - bbox[0]
-    bh = bbox[3] - bbox[1]
-    bbox_cx = (bbox[0] + bbox[2]) * 0.5
-    bbox_cy = (bbox[1] + bbox[3]) * 0.5
-    # GetBBoxCenterScale padding=1.25, then fix_aspect_ratio(aspect=1.0)
-    bbox_size = max(bw, bh) * 1.25
-
-    px = principal_x if principal_x > 0.0 else img_w * 0.5
-    py = principal_y if principal_y > 0.0 else img_h * 0.5
-
-    bs = bbox_size * s + 1e-8
-    tz = 2.0 * focal_length / bs
-    cx = 2.0 * (bbox_cx - px) / bs
-    cy = 2.0 * (bbox_cy - py) / bs
-
-    return np.array([tx + cx, ty + cy, tz], dtype=np.float32)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -175,13 +141,10 @@ def fsb_result_to_output(model, result: FsbResult, frame_h: int, frame_w: int,
 
     verts_np = verts[0].cpu().float().numpy()   # [18439, 3]
 
-    # Convert raw camera params to full camera translation
-    cam_raw   = np.array(list(result.pred_cam_t[:3]))
-    bbox      = np.array(list(result.bbox[:4]))
-    fl        = float(result.focal_length)
-    pred_cam_t = cam_raw_to_pred_cam_t(
-        cam_raw, bbox, fl, frame_w, frame_h, principal_x, principal_y
-    )
+    # C engine already converts raw head output → [tx, ty, tz] (see fast_sam_3dbody.cpp)
+    pred_cam_t = np.array(list(result.pred_cam_t[:3]))
+    bbox       = np.array(list(result.bbox[:4]))
+    fl         = float(result.focal_length)
 
     # Project 3-D keypoints to 2-D image space
     if j3d is not None:

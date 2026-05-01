@@ -459,9 +459,23 @@ int main(int argc, const char** argv) {
         for (const auto& r : results) {
             if (!lbs) continue;
 
+            // Decode scale PCA into model_params[136:204] if available.
+            // Python: scales = scale_mean + scale_params @ scale_comps  ([28]→[68])
+            // build_model_params zeros [136:204]; fill them here if lbs has scale data.
+            std::array<float, 204> mp = r.mhr_model_params;
+            if (lbs->scale_mean && lbs->scale_comps && !r.scale.empty()) {
+                int ns = lbs->n_scale_out;  // 68
+                int np = lbs->n_scale_pc;   // 28
+                for (int i = 0; i < ns; ++i)
+                    mp[136 + i] = lbs->scale_mean[i];
+                for (int k = 0; k < np && k < (int)r.scale.size(); ++k)
+                    for (int i = 0; i < ns; ++i)
+                        mp[136 + i] += r.scale[k] * lbs->scale_comps[k * ns + i];
+            }
+
             // Run native C LBS forward pass, stream result to GPU
             mhr_lbs_compute(lbs,
-                            r.mhr_model_params.data(),
+                            mp.data(),
                             r.shape.data(),
                             r.face_params.data(),
                             lbs_out.data());

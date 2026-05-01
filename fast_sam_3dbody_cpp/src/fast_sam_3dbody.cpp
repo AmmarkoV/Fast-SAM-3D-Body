@@ -750,7 +750,8 @@ struct Pipeline::Impl
             const float* g6d = p;
             float ge[3];
             rot6d_to_euler(g6d, ge);
-            r.global_rot = { ge[0], ge[1], ge[2] };
+            // rot6d_to_euler returns [rx,ry,rz] but mhr_forward expects [rz,ry,rx]
+            r.global_rot = { ge[2], ge[1], ge[0] };
 
             // Body pose
             const float* bc = p + 6;
