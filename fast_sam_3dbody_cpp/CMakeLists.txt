@@ -117,16 +117,20 @@ endif()
 find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio highgui dnn)
 message(STATUS "OpenCV ${OpenCV_VERSION}")
 
+set(GRAPHICS_ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/GraphicsEngine)
+
 # ---------------------------------------------------------------------------
 # fast_sam_3dbody  library
 # ---------------------------------------------------------------------------
 add_library(fast_sam_3dbody SHARED
     src/fast_sam_3dbody.cpp
     src/fast_sam_3dbody_capi.cpp
+    ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_transform_joints.c
 )
 
 target_include_directories(fast_sam_3dbody PUBLIC
     src
+    ${GRAPHICS_ENGINE_DIR}
     ${ggml_SOURCE_DIR}/include
     ${ORT_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
@@ -163,8 +167,6 @@ target_compile_options(fast_sam_3dbody_run PRIVATE
 # ---------------------------------------------------------------------------
 find_package(OpenGL REQUIRED)
 find_package(GLEW   REQUIRED)
-
-set(GRAPHICS_ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/GraphicsEngine)
 
 add_executable(fast_sam_3dbody_render
     render/fast_sam_3dbody_render.cpp

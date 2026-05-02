@@ -43,6 +43,9 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/dnn.hpp>
 
+// ── LBS ──────────────────────────────────────────────────────────────────────
+#include "../GraphicsEngine/ModelLoader/model_loader_transform_joints.h"
+
 // ── STL ──────────────────────────────────────────────────────────────────────
 #include <algorithm>
 #include <cassert>
@@ -324,6 +327,9 @@ struct Pipeline::Impl
     struct KpEntry { int32_t row; int32_t col; float val; };
     std::vector<KpEntry> kp_mapping;
 
+    // Native C LBS (body_model.lbs) — loaded when body_model.onnx is unavailable
+    struct MHR_LBS_Data* lbs_data = nullptr;
+
     // ── load ──────────────────────────────────────────────────────────────────
     bool load(const PipelineConfig& c)
     {
@@ -396,9 +402,46 @@ struct Pipeline::Impl
             }
             else
             {
-                printf("[FSB] body_model.onnx not found; vertex output disabled.\n");
-                printf("[FSB] (body_model.pt exists – ggml implementation planned)\n");
-                // Not a fatal error: vertices / keypoints will be empty in MHRResult
+                printf("[FSB] body_model.onnx not found; trying body_model.lbs … ");
+                fflush(stdout);
+                std::string lbs_path = opath("body_model.lbs");
+                lbs_data = mhr_lbs_load(lbs_path.c_str());
+                if (lbs_data)
+                {
+                    printf("OK (%d joints, %d vertices)\n", lbs_data->n_joints, lbs_data->n_verts);
+
+                    // Load keypoint mapping even with LBS
+                    std::string kp_path = opath("keypoint_mapping.bin");
+                    std::ifstream kp_f(kp_path, std::ios::binary);
+                    if (kp_f.is_open())
+                    {
+                        uint32_t num_rows, num_cols, nnz;
+                        kp_f.read(reinterpret_cast<char*>(&num_rows), 4);
+                        kp_f.read(reinterpret_cast<char*>(&num_cols), 4);
+                        kp_f.read(reinterpret_cast<char*>(&nnz), 4);
+                        kp_mapping.reserve(nnz);
+                        for (uint32_t i = 0; i < nnz; ++i)
+                        {
+                            KpEntry e;
+                            kp_f.read(reinterpret_cast<char*>(&e.row), 4);
+                            kp_f.read(reinterpret_cast<char*>(&e.col), 4);
+                            kp_f.read(reinterpret_cast<char*>(&e.val), 4);
+                            kp_mapping.push_back(e);
+                        }
+                        kp_f.close();
+                        printf("[FSB] keypoint_mapping: %ux%u, %u non-zero entries\n",
+                               num_rows, num_cols, nnz);
+                    }
+                    else
+                    {
+                        printf("[FSB] keypoint_mapping.bin not found – 2D keypoint output disabled\n");
+                    }
+                }
+                else
+                {
+                    printf("not found\n");
+                    printf("[FSB] body_model.lbs not found; vertex/keypoint output disabled.\n");
+                }
             }
         }
 
@@ -678,6 +721,7 @@ struct Pipeline::Impl
 
         // ── body model (optional) ─────────────────────────────────────────────
         std::vector<float> all_verts, all_skel;
+        bool use_lbs_skel = false;  // true if skeleton from LBS (float32, [127,3])
         if (!cfg.skip_body_model && sess_body.session)
         {
             t0 = Clock::now();
@@ -745,6 +789,43 @@ struct Pipeline::Impl
             all_verts.assign(vp, vp + vn);
             all_skel.assign(sp,  sp + sn);
             printf("[FSB] body_model: %.1f ms\n", ms(t0));
+        }
+        else if (!cfg.skip_body_model && lbs_data)
+        {
+            // Native C LBS fallback: compute vertices + joint coordinates
+            use_lbs_skel = true;
+            t0 = Clock::now();
+            const int NPOSE = (int)meta.npose;
+            all_verts.resize(B * 18439 * 3);
+            all_skel.resize(B * 127 * 3);  // LBS outputs joints as [127, 3]
+
+            for (int i = 0; i < B; ++i)
+            {
+                const float* raw_i = mhr_raw.data() + i * NPOSE;
+                const float* global_rot_6d = raw_i;
+                const float* body_cont     = raw_i + 6;
+                const float* shape         = raw_i + 266;
+                const float* face          = raw_i + 447;
+
+                float global_rot_euler[3];
+                rot6d_to_euler(global_rot_6d, global_rot_euler);
+
+                float body_euler[133] = {};
+                compact_cont_to_body_params(body_cont, body_euler);
+
+                ModelParams204 mp = build_model_params(global_rot_euler, body_euler, nullptr, true);
+
+                float* verts_out = all_verts.data() + (size_t)i * 18439 * 3;
+                float* joints_out = all_skel.data() + (size_t)i * 127 * 3;
+
+                mhr_lbs_compute(lbs_data,
+                                mp.data,
+                                raw_i + 266,  /* shape */
+                                raw_i + 447,  /* face */
+                                verts_out,
+                                joints_out);
+            }
+            printf("[FSB] LBS:      %.1f ms\n", ms(t0));
         }
 
         // ── assemble MHRResult per person ────────────────────────────────────
@@ -833,16 +914,31 @@ struct Pipeline::Impl
                 // Compute 70 MHR keypoints from vertices + skeleton joints
                 if (!kp_mapping.empty())
                 {
-                    // Extract joint coordinates from skeleton state [B, 127, 8]
-                    // First 3 floats64 are position (x,y,z), scaled by 0.01
-                    size_t skel_off = (size_t)i * 127 * 8;
+                    // Extract joint coordinates from skeleton state
                     std::vector<float> joint_coords(127 * 3);
-                    for (int j = 0; j < 127; ++j)
+                    if (use_lbs_skel)
                     {
-                        const float* skel_j = all_skel.data() + skel_off + j * 8;
-                        joint_coords[j*3 + 0] = (float)skel_j[0] * 0.01f;
-                        joint_coords[j*3 + 1] = (float)skel_j[1] * 0.01f;
-                        joint_coords[j*3 + 2] = (float)skel_j[2] * 0.01f;
+                        // LBS output: float32 [B, 127, 3], already in meters, already flipped
+                        const float* skel_j = all_skel.data() + (size_t)i * 127 * 3;
+                        std::copy(skel_j, skel_j + 127*3, joint_coords.begin());
+                    }
+                    else
+                    {
+                        // ONNX body model output: float32 [B, 127, 8], cm scale
+                        // First 3 floats per joint are position (x,y,z) in cm
+                        const float* skel_j = all_skel.data() + (size_t)i * 127 * 8;
+                        for (int j = 0; j < 127; ++j)
+                        {
+                            joint_coords[j*3 + 0] = skel_j[j*8 + 0] * 0.01f;
+                            joint_coords[j*3 + 1] = skel_j[j*8 + 1] * 0.01f;
+                            joint_coords[j*3 + 2] = skel_j[j*8 + 2] * 0.01f;
+                        }
+                        // Flip y,z to match vertex coordinate system
+                        for (int j = 0; j < 127; ++j)
+                        {
+                            joint_coords[j*3 + 1] *= -1.f;
+                            joint_coords[j*3 + 2] *= -1.f;
+                        }
                     }
 
                     // Apply keypoint_mapping: sparse matrix-vector multiply
@@ -906,6 +1002,11 @@ struct Pipeline::Impl
         sess_decoder.free();
         sess_body.free();
         sess_yolo.free();
+        if (lbs_data)
+        {
+            mhr_lbs_free(lbs_data);
+            lbs_data = nullptr;
+        }
         loaded = false;
     }
 };

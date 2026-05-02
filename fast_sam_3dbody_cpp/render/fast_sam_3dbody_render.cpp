@@ -478,7 +478,8 @@ int main(int argc, const char** argv) {
                             mp.data(),
                             r.shape.data(),
                             r.face_params.data(),
-                            lbs_out.data());
+                            lbs_out.data(),
+                            nullptr);
             mhr_update_mesh_vertices(tri_model, lbs_out.data());
 
             // Debug: print vertex bounds in model space
