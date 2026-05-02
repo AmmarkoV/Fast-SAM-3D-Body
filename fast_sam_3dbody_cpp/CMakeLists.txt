@@ -133,6 +133,7 @@ set_target_properties(AmMatrix PROPERTIES
 add_library(fast_sam_3dbody SHARED
     src/fast_sam_3dbody.cpp
     src/fast_sam_3dbody_capi.cpp
+    ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_tri.c
     ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_transform_joints.c
 )
 

@@ -431,14 +431,15 @@ int main(int argc, const char** argv) {
         // Annotate frame: draw YOLO skeleton when LBS mesh is unavailable.
         cv::Mat vis = frame.clone();
         bool any_mesh = lbs && !results.empty();
-        //any_mesh = true; //Test
-        if (!any_mesh) {
+        if (!any_mesh) 
+        {
             for (const auto& r : results)
                 draw_yolo_skeleton(vis, r.keypoints_yolo);
         }
 
         // Upload background (with optional skeleton annotation)
-        upload_bg_frame(bg, vis);
+        
+        upload_bg_frame(bg, vis); //<-- THIS SEGFAULTS!
 
         glClearColor(0.f, 0.f, 0.f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);

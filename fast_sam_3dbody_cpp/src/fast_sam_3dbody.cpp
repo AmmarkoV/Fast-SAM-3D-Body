@@ -815,7 +815,7 @@ struct Pipeline::Impl
 
                 ModelParams204 mp = build_model_params(global_rot_euler, body_euler, nullptr, true);
 
-                float* verts_out = all_verts.data() + (size_t)i * 18439 * 3;
+                float* verts_out  = all_verts.data() + (size_t)i * 18439 * 3;
                 float* joints_out = all_skel.data() + (size_t)i * 127 * 3;
 
                 mhr_lbs_compute(lbs_data,
