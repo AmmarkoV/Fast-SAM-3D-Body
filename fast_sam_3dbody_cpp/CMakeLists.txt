@@ -131,6 +131,7 @@ add_library(fast_sam_3dbody SHARED
 target_include_directories(fast_sam_3dbody PUBLIC
     src
     ${GRAPHICS_ENGINE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../AmMatrix
     ${ggml_SOURCE_DIR}/include
     ${ORT_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
@@ -140,6 +141,8 @@ target_link_libraries(fast_sam_3dbody PUBLIC
     ggml
     ${ORT_LIBS}
     ${OpenCV_LIBS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../AmMatrix/libAmMatrix.a
+    m
 )
 
 if(WITH_CUDA)
