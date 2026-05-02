@@ -319,6 +319,11 @@ struct Pipeline::Impl
     // CPU FFNs for MHR + camera heads (weights loaded from GGUF)
     CFFN mhr_ffn, cam_ffn;
 
+    // Keypoint mapping: sparse COO format for 70 MHR keypoints
+    // Maps [vertices(18439) + joints(127)] → 70 keypoints
+    struct KpEntry { int32_t row; int32_t col; float val; };
+    std::vector<KpEntry> kp_mapping;
+
     // ── load ──────────────────────────────────────────────────────────────────
     bool load(const PipelineConfig& c)
     {
@@ -361,6 +366,33 @@ struct Pipeline::Impl
                 if (!sess_body.load(ort_env, bm_onnx, cuda, dev, false, false))
                     return false;
                 printf("OK\n");
+
+                // Load keypoint mapping for 70 MHR keypoints
+                std::string kp_path = opath("keypoint_mapping.bin");
+                std::ifstream kp_f(kp_path, std::ios::binary);
+                if (kp_f.is_open())
+                {
+                    uint32_t num_rows, num_cols, nnz;
+                    kp_f.read(reinterpret_cast<char*>(&num_rows), 4);
+                    kp_f.read(reinterpret_cast<char*>(&num_cols), 4);
+                    kp_f.read(reinterpret_cast<char*>(&nnz), 4);
+                    kp_mapping.reserve(nnz);
+                    for (uint32_t i = 0; i < nnz; ++i)
+                    {
+                        KpEntry e;
+                        kp_f.read(reinterpret_cast<char*>(&e.row), 4);
+                        kp_f.read(reinterpret_cast<char*>(&e.col), 4);
+                        kp_f.read(reinterpret_cast<char*>(&e.val), 4);
+                        kp_mapping.push_back(e);
+                    }
+                    kp_f.close();
+                    printf("[FSB] keypoint_mapping: %ux%u, %u non-zero entries\n",
+                           num_rows, num_cols, nnz);
+                }
+                else
+                {
+                    printf("[FSB] keypoint_mapping.bin not found – 2D keypoint output disabled\n");
+                }
             }
             else
             {
@@ -796,6 +828,67 @@ struct Pipeline::Impl
                 {
                     r.pred_vertices[k*3 + 1] *= -1.f;
                     r.pred_vertices[k*3 + 2] *= -1.f;
+                }
+
+                // Compute 70 MHR keypoints from vertices + skeleton joints
+                if (!kp_mapping.empty())
+                {
+                    // Extract joint coordinates from skeleton state [B, 127, 8]
+                    // First 3 floats64 are position (x,y,z), scaled by 0.01
+                    size_t skel_off = (size_t)i * 127 * 8;
+                    std::vector<float> joint_coords(127 * 3);
+                    for (int j = 0; j < 127; ++j)
+                    {
+                        const float* skel_j = all_skel.data() + skel_off + j * 8;
+                        joint_coords[j*3 + 0] = (float)skel_j[0] * 0.01f;
+                        joint_coords[j*3 + 1] = (float)skel_j[1] * 0.01f;
+                        joint_coords[j*3 + 2] = (float)skel_j[2] * 0.01f;
+                    }
+
+                    // Apply keypoint_mapping: sparse matrix-vector multiply
+                    // [vertices(18439*3) + joints(127*3)] → keypoints_3d[70*3]
+                    const float* verts_ptr = r.pred_vertices.data();
+                    const float* joints_ptr = joint_coords.data();
+                    std::vector<float> kps_3d(70 * 3, 0.f);
+
+                    for (const auto& entry : kp_mapping)
+                    {
+                        // Each keypoint has 3 consecutive rows (x,y,z)
+                        float coord_val = entry.val;
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            int row = entry.row * 3 + c;
+                            int col = entry.col;
+                            float src_val = 0.f;
+                            if (col < 18439)
+                                src_val = verts_ptr[col * 3 + c];
+                            else
+                                src_val = joints_ptr[(col - 18439) * 3 + c];
+                            kps_3d[row] += src_val * coord_val;
+                        }
+                    }
+
+                    // Flip y,z to match vertex coordinate system
+                    for (int k = 0; k < 70; ++k)
+                    {
+                        kps_3d[k*3 + 1] *= -1.f;
+                        kps_3d[k*3 + 2] *= -1.f;
+                    }
+
+                    r.keypoints_3d = std::move(kps_3d);
+
+                    // Project to 2D: kps_cam = kps_3d + pred_cam_t, then perspective divide
+                    std::vector<float> kps_2d(70 * 2);
+                    for (int k = 0; k < 70; ++k)
+                    {
+                        float dz = kps_3d[k*3 + 2] + r.pred_cam_t[2];
+                        float dx = kps_3d[k*3 + 0] + r.pred_cam_t[0];
+                        float dy = kps_3d[k*3 + 1] + r.pred_cam_t[1];
+                        if (dz < 1e-4f) dz = 1e-4f;
+                        kps_2d[k*2 + 0] = dx / dz * fx + cx;
+                        kps_2d[k*2 + 1] = dy / dz * fx + cy;
+                    }
+                    r.keypoints_2d = std::move(kps_2d);
                 }
             }
         }
