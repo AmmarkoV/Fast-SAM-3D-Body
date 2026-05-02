@@ -120,6 +120,14 @@ message(STATUS "OpenCV ${OpenCV_VERSION}")
 set(GRAPHICS_ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/GraphicsEngine)
 
 # ---------------------------------------------------------------------------
+# AmMatrix  (pre-built static library)
+# ---------------------------------------------------------------------------
+add_library(AmMatrix STATIC IMPORTED)
+set_target_properties(AmMatrix PROPERTIES
+    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/AmMatrix/libAmMatrix.a"
+)
+
+# ---------------------------------------------------------------------------
 # fast_sam_3dbody  library
 # ---------------------------------------------------------------------------
 add_library(fast_sam_3dbody SHARED
@@ -141,7 +149,7 @@ target_link_libraries(fast_sam_3dbody PUBLIC
     ggml
     ${ORT_LIBS}
     ${OpenCV_LIBS}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../AmMatrix/libAmMatrix.a
+    AmMatrix
     m
 )
 
@@ -196,7 +204,7 @@ target_link_libraries(fast_sam_3dbody_render PRIVATE
     X11
     rt
     m
-    ${CMAKE_CURRENT_SOURCE_DIR}/AmMatrix/libAmMatrix.a
+    AmMatrix
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
