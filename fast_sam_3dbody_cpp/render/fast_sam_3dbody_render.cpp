@@ -20,6 +20,7 @@ extern "C" {
 }
 
 #include "../src/fast_sam_3dbody.h"
+#include "../src/preprocess.hpp"   // for fsb::apply_hand_pose
 #include "mhr_pose_driver.h"
 
 #include <opencv2/imgcodecs.hpp>
@@ -330,7 +331,14 @@ static void draw_yolo_skeleton(cv::Mat& img,
 
 static void save_framebuffer(const std::string& path, int w, int h) {
     std::vector<uint8_t> px(w * h * 3);
+    // Default GL_PACK_ALIGNMENT is 4 — for widths whose row byte-count (w*3)
+    // is not divisible by 4 (e.g. 2250×3 = 6750 → 2 pad bytes/row) glReadPixels
+    // writes over-aligned rows, shearing the saved image into a parallelogram.
+    GLint old_pack = 4;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &old_pack);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+    glPixelStorei(GL_PACK_ALIGNMENT, old_pack);
     // glReadPixels gives bottom-up rows; flip vertically
     cv::Mat img(h, w, CV_8UC3, px.data());
     cv::flip(img, img, 0);
@@ -520,6 +528,21 @@ int main(int argc, const char** argv) {
             // Python: scales = scale_mean + scale_params @ scale_comps  ([28]→[68])
             // build_model_params zeros [136:204]; fill them here if lbs has scale data.
             std::array<float, 204> mp = r.mhr_model_params;
+            // Apply hand pose (v3 lbs file required).  This overrides the zeroed
+            // hand joint slots that build_model_params left in mp with the
+            // PCA-decoded per-finger Euler angles, exactly as Python's
+            // replace_hands_in_pose() does.
+            if (lbs->hand_pose_mean && lbs->hand_pose_comps &&
+                lbs->hand_joint_idxs_left && lbs->hand_joint_idxs_right &&
+                !r.hand_pose.empty())
+            {
+                fsb::apply_hand_pose(mp.data(),
+                                      r.hand_pose.data(),
+                                      lbs->hand_pose_mean,
+                                      lbs->hand_pose_comps,
+                                      lbs->hand_joint_idxs_left,
+                                      lbs->hand_joint_idxs_right);
+            }
             if (lbs->scale_mean && lbs->scale_comps && !r.scale.empty()) {
                 int ns = lbs->n_scale_out;  // 68
                 int np = lbs->n_scale_pc;   // 28
@@ -538,6 +561,21 @@ int main(int argc, const char** argv) {
                             lbs_out.data(),
                             nullptr);
             mhr_update_mesh_vertices(tri_model, lbs_out.data());
+
+            // First-frame verts dump for verify_transforms.py LBS comparison
+            { static int verts_dumped = 0;
+              if (!verts_dumped) {
+                  verts_dumped = 1;
+                  FILE* fp = fopen("/tmp/cpp_lbs_verts.bin", "wb");
+                  if (fp) {
+                      int hdr[2] = { (int)MHR_VERTEX_COUNT, 3 };
+                      fwrite(hdr, sizeof(int), 2, fp);
+                      fwrite(lbs_out.data(), sizeof(float), MHR_VERTEX_FLOATS, fp);
+                      fclose(fp);
+                      fprintf(stderr, "[LBS] wrote first-frame verts to /tmp/cpp_lbs_verts.bin\n");
+                  }
+              }
+            }
 
             // Debug: print vertex bounds in model space
             { float xmin=1e9f,xmax=-1e9f,ymin=1e9f,ymax=-1e9f,zmin=1e9f,zmax=-1e9f;

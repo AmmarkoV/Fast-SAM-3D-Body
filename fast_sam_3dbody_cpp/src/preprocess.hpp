@@ -340,6 +340,95 @@ inline void compact_cont_to_body_params(
         body_euler[BODY_TRANS_IDXS[j]] = pt[j];
 }
 
+// ─── Hand pose decode  (PCA + 6D/atan2 → 27 Euler params per hand) ───────────
+//
+// Mirrors Python:
+//   replace_hands_in_pose(full_pose_params, hand_pose_params)
+//     left, right            = split(hand_pose_params [108], [54, 54])
+//     for h in (left, right):
+//         decoded[54]    = hand_pose_mean + h @ hand_pose_comps
+//         params[27]     = compact_cont_to_model_params_hand_fast(decoded)
+//         full_pose_params[hand_joint_idxs_{l,r}] = params
+//
+// Joint DoF table _HAND_DOFS_IN_ORDER (mhr_utils.py):
+//   {3,1,1, 3,1,1, 3,1,1, 3,1,1, 2,3,1,1}  (16 joints, sum=27 = N_HAND_OUT)
+// 3-DoF joint  → 6 cont → 3 euler via rot6d_to_euler
+// 1-DoF joint  → 2 cont → 1 atan2
+// 2-DoF joint  → 4 cont → 2 atan2 (treated as two 1-DoF entries side-by-side)
+static constexpr int HAND_DOFS_IN_ORDER[16] = {3,1,1, 3,1,1, 3,1,1, 3,1,1, 2,3,1,1};
+
+// Decode one hand's 54-D PCA-decoded vector → 27-D Euler param vector.
+// out[27] is fully written (no zero-init needed).
+inline void compact_cont_to_hand_params(const float* cont54, float* out27)
+{
+    int cont_pos  = 0;   // running cursor in the 54-D cont vector
+    int param_pos = 0;   // running cursor in the 27-D output
+    for (int j = 0; j < 16; ++j) {
+        int k = HAND_DOFS_IN_ORDER[j];
+        if (k == 3) {
+            float euler[3];
+            rot6d_to_euler(cont54 + cont_pos, euler);
+            out27[param_pos + 0] = euler[0];
+            out27[param_pos + 1] = euler[1];
+            out27[param_pos + 2] = euler[2];
+            cont_pos  += 6;
+            param_pos += 3;
+        } else {
+            // k == 1 or 2: each contributes k pairs (sin,cos) in cont and k atan2s in params.
+            for (int i = 0; i < k; ++i) {
+                float s = cont54[cont_pos + 0];
+                float c = cont54[cont_pos + 1];
+                out27[param_pos] = std::atan2(s, c);
+                cont_pos  += 2;
+                param_pos += 1;
+            }
+        }
+    }
+}
+
+// Apply both hands' pose to an existing model_params [204] vector.
+// hand_pose_params [108]   = the C engine's r.hand_pose (54 left + 54 right, raw 6D codes)
+// hand_pose_mean   [54]    from body_model.lbs
+// hand_pose_comps  [54×54] from body_model.lbs (row-major; matches Python .mm semantics)
+// hand_joint_idxs_{l,r} [27] absolute indices in full_pose_params [136]
+//   (i.e., index into model_params[0:136]; offsets 0..2 are global_trans, 3..5 global_rot)
+inline void apply_hand_pose(
+    float*       model_params204,
+    const float* hand_pose_params,    // [108]
+    const float* hand_pose_mean,      // [54]
+    const float* hand_pose_comps,     // [54×54]  row-major (Python h.mm(comps) → out[i] = sum_k h[k]*comps[k,i])
+    const int*   hand_joint_idxs_left,// [27]
+    const int*   hand_joint_idxs_right) // [27]
+{
+    if (!model_params204 || !hand_pose_params || !hand_pose_mean ||
+        !hand_pose_comps || !hand_joint_idxs_left || !hand_joint_idxs_right)
+        return;
+
+    auto decode_one = [&](const float* h54, const int* idx27)
+    {
+        // PCA decode: decoded[i] = mean[i] + Σ_k h54[k] * comps[k, i]
+        float decoded[54];
+        for (int i = 0; i < 54; ++i) decoded[i] = hand_pose_mean[i];
+        for (int k = 0; k < 54; ++k) {
+            float hk = h54[k];
+            if (hk == 0.f) continue;
+            const float* row = hand_pose_comps + (size_t)k * 54;
+            for (int i = 0; i < 54; ++i) decoded[i] += hk * row[i];
+        }
+        // 6D / atan2 → 27 Euler params
+        float params[27];
+        compact_cont_to_hand_params(decoded, params);
+        // Insert into model_params at absolute joint indices
+        for (int i = 0; i < 27; ++i) {
+            int idx = idx27[i];
+            if (idx >= 0 && idx < 136) model_params204[idx] = params[i];
+        }
+    };
+
+    decode_one(hand_pose_params + 0,  hand_joint_idxs_left);   // left  hand: cont[0:54]
+    decode_one(hand_pose_params + 54, hand_joint_idxs_right);  // right hand: cont[54:108]
+}
+
 // ─── Assemble model_params [204] for the torch.jit body model ─────────────────
 //
 // body_model.onnx expects:

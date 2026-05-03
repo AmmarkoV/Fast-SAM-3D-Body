@@ -284,6 +284,46 @@ def main():
              j3d=data["j3d"])
     print(f"\nSaved reference data to {args.out_dir}/ref_data.npz")
 
+    # ── Compare against C-LBS output (if dumped by fast_sam_3dbody_render) ──
+    cpp_dump = "/tmp/cpp_lbs_verts.bin"
+    if os.path.exists(cpp_dump):
+        with open(cpp_dump, "rb") as f:
+            n_v, n_c = np.frombuffer(f.read(8), dtype=np.int32)
+            cpp_v = np.frombuffer(f.read(int(n_v) * int(n_c) * 4),
+                                   dtype=np.float32).reshape(n_v, n_c).astype(np.float64)
+        print(f"\n── C-LBS verts comparison ────────────────────────────────────")
+        print(f"  cpp verts: {cpp_v.shape}")
+        print(f"  cpp bounds: X[{cpp_v[:,0].min():.4f}, {cpp_v[:,0].max():.4f}]  "
+              f"Y[{cpp_v[:,1].min():.4f}, {cpp_v[:,1].max():.4f}]  "
+              f"Z[{cpp_v[:,2].min():.4f}, {cpp_v[:,2].max():.4f}]")
+        print(f"  py  bounds: X[{V[:,0].min():.4f}, {V[:,0].max():.4f}]  "
+              f"Y[{V[:,1].min():.4f}, {V[:,1].max():.4f}]  "
+              f"Z[{V[:,2].min():.4f}, {V[:,2].max():.4f}]")
+        if cpp_v.shape == V.shape:
+            d = np.abs(cpp_v - V)
+            print(f"  per-vertex |diff| max:  {d.max():.6f} m  ({d.max()*100:.3f} cm)")
+            print(f"  per-vertex |diff| mean: {d.mean():.6f} m  ({d.mean()*100:.4f} cm)")
+            if d.max() < 1e-3:
+                print("  *** C-LBS ≡ Python MHR (sub-mm) ***")
+            elif d.max() < 0.01:
+                print("  *** C-LBS ≈ Python MHR (sub-cm) ***")
+            else:
+                print("  !!! C-LBS DIVERGES from Python MHR !!!")
+            # Show worst-offender vertices
+            per_v = d.max(axis=1)
+            worst = np.argsort(-per_v)[:10]
+            print(f"  worst 10 vertex indices: {worst.tolist()}")
+            print(f"  worst per-axis diffs:")
+            for vi in worst[:5]:
+                print(f"    v[{vi:5d}]  cpp={cpp_v[vi]}  py={V[vi]}  diff={cpp_v[vi]-V[vi]}")
+            # Histogram of disagreement levels
+            for thr in (0.001, 0.005, 0.01, 0.05, 0.1):
+                n = int((per_v > thr).sum())
+                print(f"  verts with |diff|>{thr*1000:.1f}mm : {n} ({100*n/len(per_v):.2f}%)")
+    else:
+        print(f"\n[skip] {cpp_dump} not found — run "
+              "`build/fast_sam_3dbody_render --from <image>` first to dump it")
+
 
 if __name__ == "__main__":
     main()

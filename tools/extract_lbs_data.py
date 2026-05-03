@@ -10,9 +10,11 @@ import numpy as np
 import torch
 
 MAGIC   = 0x4C425300  # 'LBS\0'
-VERSION = 2
+VERSION = 3                # v3 appends hand-pose PCA + hand joint indices
 N_SCALE_PC  = 28
 N_SCALE_OUT = 68
+N_HAND_PCA  = 54           # hand_pose_mean shape; hand_pose_comps shape [54,54]
+N_HAND_OUT  = 27           # 27 Euler params per hand inserted into model_params
 
 def main():
     ap = argparse.ArgumentParser()
@@ -55,8 +57,12 @@ def main():
     print("All body model shapes OK.")
 
     # Load scale PCA parameters from the full model checkpoint
+    hand_pose_mean        = np.zeros(N_HAND_PCA,           dtype=np.float32)
+    hand_pose_comps       = np.eye(N_HAND_PCA,             dtype=np.float32)
+    hand_joint_idxs_left  = np.zeros(N_HAND_OUT,           dtype=np.int32)
+    hand_joint_idxs_right = np.zeros(N_HAND_OUT,           dtype=np.int32)
     if args.ckpt:
-        print(f"Loading scale params from {args.ckpt} ...")
+        print(f"Loading scale + hand params from {args.ckpt} ...")
         ckpt = torch.load(args.ckpt, map_location="cpu")
         sd2 = ckpt if isinstance(ckpt, dict) and "backbone.encoder.cls_token" in ckpt else ckpt.get("state_dict", ckpt)
         scale_mean  = sd2["head_pose.scale_mean"].numpy().astype(np.float32)   # [68]
@@ -64,8 +70,22 @@ def main():
         assert scale_mean.shape  == (N_SCALE_OUT,),            scale_mean.shape
         assert scale_comps.shape == (N_SCALE_PC, N_SCALE_OUT), scale_comps.shape
         print(f"  scale_mean[:5] = {scale_mean[:5].tolist()}")
+
+        # Hand pose PCA + per-hand joint index tables.  These tensors live on the
+        # MHRHead module (head_pose), not on the JIT body model.
+        hand_pose_mean        = sd2["head_pose.hand_pose_mean"].numpy().astype(np.float32)
+        hand_pose_comps       = sd2["head_pose.hand_pose_comps"].numpy().astype(np.float32)
+        hand_joint_idxs_left  = sd2["head_pose.hand_joint_idxs_left"].numpy().astype(np.int32)
+        hand_joint_idxs_right = sd2["head_pose.hand_joint_idxs_right"].numpy().astype(np.int32)
+        assert hand_pose_mean.shape        == (N_HAND_PCA,),               hand_pose_mean.shape
+        assert hand_pose_comps.shape       == (N_HAND_PCA, N_HAND_PCA),    hand_pose_comps.shape
+        assert hand_joint_idxs_left.shape  == (N_HAND_OUT,),               hand_joint_idxs_left.shape
+        assert hand_joint_idxs_right.shape == (N_HAND_OUT,),               hand_joint_idxs_right.shape
+        print(f"  hand_pose_mean[:5] = {hand_pose_mean[:5].tolist()}")
+        print(f"  hand_joint_idxs_left[:5]  = {hand_joint_idxs_left[:5].tolist()}")
+        print(f"  hand_joint_idxs_right[:5] = {hand_joint_idxs_right[:5].tolist()}")
     else:
-        print("WARNING: no --ckpt provided, writing zero scale_mean/scale_comps (shape will be wrong)")
+        print("WARNING: no --ckpt provided, writing zero scale & identity hand-pose tensors")
         scale_mean  = np.zeros(N_SCALE_OUT, dtype=np.float32)
         scale_comps = np.zeros((N_SCALE_PC, N_SCALE_OUT), dtype=np.float32)
 
@@ -92,6 +112,11 @@ def main():
         # version 2: scale PCA data
         f.write(scale_mean.tobytes())                      # 68*4
         f.write(scale_comps.tobytes())                     # 28*68*4
+        # version 3: hand-pose PCA + per-hand joint index tables
+        f.write(hand_pose_mean.tobytes())                  # 54*4
+        f.write(hand_pose_comps.tobytes())                 # 54*54*4
+        f.write(hand_joint_idxs_left.tobytes())            # 27*4
+        f.write(hand_joint_idxs_right.tobytes())           # 27*4
 
     sz = os.path.getsize(args.out)
     print(f"Done — {sz:,} bytes ({sz/1e6:.1f} MB)")
