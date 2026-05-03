@@ -159,24 +159,64 @@ static MeshGPU upload_mesh_once(const struct TRI_Model* m)
 
 struct BgTex { GLuint id; int w, h; bool ready; };
 
-static BgTex create_bg_tex() 
+static BgTex create_bg_tex()
 {
     BgTex t{0, 0, 0, false};
+
     glGenTextures(1, &t.id);
+    if (t.id == 0) {
+        fprintf(stderr, "[GL] glGenTextures returned 0 — out of texture objects?\n");
+        return t;
+    }
+
     glBindTexture(GL_TEXTURE_2D, t.id);
+    if (glGetError() != GL_NO_ERROR) {
+        fprintf(stderr, "[GL] glBindTexture(GL_TEXTURE_2D) failed\n");
+        glDeleteTextures(1, &t.id);
+        t.id = 0;
+        return t;
+    }
+
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (glGetError() != GL_NO_ERROR) {
+        fprintf(stderr, "[GL] glTexParameteri failed\n");
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDeleteTextures(1, &t.id);
+        t.id = 0;
+        return t;
+    }
+
     glBindTexture(GL_TEXTURE_2D, 0);
+    if (glGetError() != GL_NO_ERROR) {
+        fprintf(stderr, "[GL] glBindTexture(0) failed\n");
+        glDeleteTextures(1, &t.id);
+        t.id = 0;
+    }
+
+    t.ready = true;
     return t;
 }
 
 // Upload a BGR frame. Converts to RGB so the sampler returns correct colours.
-static void upload_bg_frame(BgTex& t, const cv::Mat& bgr) 
+static void upload_bg_frame(BgTex& t, const cv::Mat& bgr)
 {
     cv::Mat rgb;
     cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+    if (rgb.empty() || rgb.data == nullptr) {
+        fprintf(stderr, "[CV] upload_bg_frame: empty or null RGB image (%dx%d)\n", bgr.cols, bgr.rows);
+        return;
+    }
+
+    // Enforce 1-byte unpack alignment — OpenCV data is tightly packed and
+    // may not satisfy GL_UNPACK_ALIGNMENT=4, causing glTexImage2D to read
+    // past the buffer end on rows where cols*3 % 4 != 0.
+    GLint old_unpack;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &old_unpack);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
     glBindTexture(GL_TEXTURE_2D, t.id);
     if (!t.ready || bgr.cols != t.w || bgr.rows != t.h) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
@@ -188,7 +228,9 @@ static void upload_bg_frame(BgTex& t, const cv::Mat& bgr)
                         bgr.cols, bgr.rows,
                         GL_RGB, GL_UNSIGNED_BYTE, rgb.data);
     }
+
     glBindTexture(GL_TEXTURE_2D, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, old_unpack);
 }
 
 // ── 4x4 matrix multiply (column-major) ──────────────────────────────────────
@@ -407,6 +449,10 @@ int main(int argc, const char** argv) {
     glGenVertexArrays(1, &quad_vao);
 
     BgTex bg = create_bg_tex();
+    if (bg.id == 0) {
+        fprintf(stderr, "[GL] Failed to create background texture\n");
+        return 1;
+    }
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
