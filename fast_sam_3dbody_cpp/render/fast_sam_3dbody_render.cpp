@@ -438,7 +438,17 @@ int main(int argc, const char** argv) {
         }
 
         // Upload background (with optional skeleton annotation)
+        if (!bg.ready)
+        {
+         fprintf(stderr, "[GL] error bg not ready\n");
+         exit(1);
+        }
         
+        if ( (vis.empty()) )
+        {
+         fprintf(stderr, "[CV] error upload_bg_frame\n");
+         exit(1);
+        }
         upload_bg_frame(bg, vis); //<-- THIS SEGFAULTS!
 
         glClearColor(0.f, 0.f, 0.f, 1.f);
