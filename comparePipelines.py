@@ -8,67 +8,33 @@ Skips all neural network inference (YOLO, backbone, decoder, FFN heads).
 Starts from MHR pose parameters and verifies both pipelines produce identical vertices.
 
 Usage:
-  # Mode 1: Extract MHR params from Python pipeline, then compare
-  python comparePipelines.py --image notebook/images/dancing.jpg \
-      --checkpoint checkpoints/sam-3d-body-dinov3/model.ckpt \
-      --mhr-model checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \
-      --detector yolo --detector-path checkpoints/yolo
-
-  # Mode 2: Use saved params (no Python model load needed)
-  python comparePipelines.py --load-params mhr_params_dancing.npz \
-      --lib-dir fast_sam_3dbody_cpp/build
-
-  # Mode 3: Full roundtrip (extract + compare + save)
-  python comparePipelines.py --image notebook/images/dancing.jpg \
-      --checkpoint checkpoints/sam-3d-body-dinov3/model.ckpt \
-      --mhr-model checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \
-      --detector yolo --detector-path checkpoints/yolo \
+  # Full run (extract + compare + C++ subprocess)
+  python comparePipelines.py --image notebook/images/dancing.jpg \\
+      --checkpoint checkpoints/sam-3d-body-dinov3/model.ckpt \\
+      --mhr-model checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \\
+      --detector yolo --detector-path checkpoints/yolo \\
       --save-params mhr_params_dancing.npz
+
+  # From saved params (fast -- skips Python pipeline)
+  python comparePipelines.py --load-params mhr_params_dancing.npz \\
+      --checkpoint checkpoints/sam-3d-body-dinov3/model.ckpt \\
+      --mhr-model checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \\
+      --image notebook/images/dancing.jpg
+
+  # Skip C++ entirely (just verify Python body model)
+  python comparePipelines.py --load-params mhr_params_dancing.npz \\
+      --checkpoint checkpoints/sam-3d-body-dinov3/model.ckpt \\
+      --mhr-model checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \\
+      --skip-cpp-pipeline
 """
 
-
-
-"""
-The comparePipelines.py script is complete and working. Here's what it does:                                                                                              
-                                                                                                                                                                            
-  Test structure:                                                                                                                                                           
-  1. Test 1 — Re-runs Python mhr_forward on extracted params, verifies determinism                                                                                          
-  2. Test 2 — Populates a ctypes FsbResult from Python params, feeds it through the C++ frontend path (fsb_result_to_output), compares vertices (ctypes roundtrip test)     
-  3. Test 3 — Runs the full C++ pipeline in a subprocess, extracts its params, feeds them to the Python body model, compares vertices                                       
-  4. Test 4 — Compares raw parameter arrays (global_rot, body_pose, shape, scale, hand_pose, face_params, pred_cam_t, focal_length, bbox)                                   
-                                                                                                                                                                            
-  Results:                                                                                                                                                                  
-  - Tests 1-2 PASS with max diff < 5e-7 (float32 precision)                                                                                                                 
-  - Tests 3-4 FAIL because C++ and Python produce different params (different YOLO detections, different FFN implementations, different focal length defaults)              
-                                                                                                                                                                            
-  Key finding: When both pipelines receive the same MHR parameters, they produce identical vertices. The discrepancy lives in the FFN head / detection stage, not in the MHR
-   -> 3D transform stage.                                                                                                                                                   
-                                                                                                                                                                            
-  Usage:                                                                                                                                                                    
-  # Full run (extract + compare + C++ subprocess)                                                                                                                         
-  python comparePipelines.py --image notebook/images/dancing.jpg \                                                                                                          
-      --checkpoint checkpoints/sam-3d-body-dinov3/model.ckpt \                                                                                                              
-      --mhr-model checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \                                                                                                      
-      --detector yolo --detector-path checkpoints/yolo \                                                                                                                    
-      --save-params mhr_params_dancing.npz                                                                                                                                  
-                                                                                                                                                                            
-  # From saved params (fast -- skips Python pipeline)                                                                                                                       
-  python comparePipelines.py --load-params mhr_params_dancing.npz \                                                                                                         
-      --checkpoint checkpoints/sam-3d-body-dinov3/model.ckpt \                                                                                                              
-      --mhr-model checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \                                                                                                      
-      --image notebook/images/dancing.jpg                                                                                                                                   
-                                                                                                                                                                            
-  # Skip C++ entirely (just verify Python body model)                                                                                                                       
-  python comparePipelines.py --load-params mhr_params_dancing.npz \                                                                                                         
-      --checkpoint checkpoints/sam-3d-body-dinov3/model.ckpt \                                                                                                              
-      --mhr-model checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \                                                                                                      
-      --skip-cpp-pipeline             
-"""
+# Must be set before any OpenGL import
+import os
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 import argparse
 import ctypes
 import json
-import os
 import sys
 import time
 
@@ -123,11 +89,11 @@ class FsbResult(ctypes.Structure):
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────────
 
-def load_library(lib_dir: str) -> ctypes.CDLL:
+def load_library(lib_dir):
     """Load libfast_sam_3dbody.so via ctypes."""
     lib_path = os.path.join(lib_dir, "libfast_sam_3dbody.so")
     if not os.path.exists(lib_path):
-        raise FileNotFoundError(f"Library not found: {lib_path}\nBuild the C++ project first.")
+        raise FileNotFoundError(f"Library not found: {lib_path}")
 
     prev = os.environ.get("LD_LIBRARY_PATH", "")
     ort_lib = os.path.join(lib_dir, "onnxruntime_dl", "lib")
@@ -203,7 +169,6 @@ def extract_python_params(image_path, checkpoint_path, mhr_model_path,
     print(f"  Detector:    {detector_name} ({detector_path})")
     print(f"  Device:      {device}")
 
-    # Load model
     t0 = time.perf_counter()
     model, model_cfg = load_sam_3d_body(
         checkpoint_path=checkpoint_path,
@@ -213,19 +178,16 @@ def extract_python_params(image_path, checkpoint_path, mhr_model_path,
     model.eval()
     print(f"  Model loaded in {(time.perf_counter()-t0)*1000:.0f} ms")
 
-    # Load detector
     from tools.build_detector import HumanDetector
     detector = HumanDetector(name=detector_name, device=device, path=detector_path)
     print(f"  Detector loaded")
 
-    # Create estimator
     estimator = SAM3DBodyEstimator(
         sam_3d_body_model=model,
         model_cfg=model_cfg,
         human_detector=detector,
     )
 
-    # Run inference
     print(f"\n  Running inference on {image_path} ...")
     t0 = time.perf_counter()
     outputs = estimator.process_one_image(image_path)
@@ -237,34 +199,31 @@ def extract_python_params(image_path, checkpoint_path, mhr_model_path,
 
     out = outputs[person_idx]
 
-    # Extract all relevant MHR parameters
     params = {}
-    params["global_rot"]     = np.asarray(out["global_rot"], dtype=np.float32)
-    params["body_pose"]      = np.asarray(out["body_pose_params"], dtype=np.float32)
-    params["shape"]          = np.asarray(out["shape_params"], dtype=np.float32)
-    params["scale"]          = np.asarray(out["scale_params"], dtype=np.float32)
-    params["hand_pose"]      = np.asarray(out["hand_pose_params"], dtype=np.float32)
-    params["face_params"]    = np.asarray(out["expr_params"], dtype=np.float32)
-    params["pred_cam_t"]     = np.asarray(out["pred_cam_t"], dtype=np.float32)
-    params["focal_length"]   = float(out["focal_length"])
-    params["bbox"]           = np.asarray(out["bbox"], dtype=np.float32)
-    params["pred_vertices"]  = np.asarray(out["pred_vertices"], dtype=np.float32)
+    params["global_rot"]        = np.asarray(out["global_rot"], dtype=np.float32)
+    params["body_pose"]         = np.asarray(out["body_pose_params"], dtype=np.float32)
+    params["shape"]             = np.asarray(out["shape_params"], dtype=np.float32)
+    params["scale"]             = np.asarray(out["scale_params"], dtype=np.float32)
+    params["hand_pose"]         = np.asarray(out["hand_pose_params"], dtype=np.float32)
+    params["face_params"]       = np.asarray(out["expr_params"], dtype=np.float32)
+    params["pred_cam_t"]        = np.asarray(out["pred_cam_t"], dtype=np.float32)
+    params["focal_length"]      = float(out["focal_length"])
+    params["bbox"]              = np.asarray(out["bbox"], dtype=np.float32)
+    params["pred_vertices"]     = np.asarray(out["pred_vertices"], dtype=np.float32)
     params["pred_keypoints_3d"] = np.asarray(out["pred_keypoints_3d"], dtype=np.float32)
     params["pred_keypoints_2d"] = np.asarray(out["pred_keypoints_2d"], dtype=np.float32)
 
-    # Verify shapes
-    assert params["global_rot"].shape == (3,), f"global_rot shape {params['global_rot'].shape}"
-    assert params["body_pose"].shape == (133,), f"body_pose shape {params['body_pose'].shape}"
-    assert params["shape"].shape == (45,), f"shape shape {params['shape'].shape}"
-    assert params["scale"].shape == (28,), f"scale shape {params['scale'].shape}"
-    assert params["hand_pose"].shape == (108,), f"hand_pose shape {params['hand_pose'].shape}"
-    assert params["face_params"].shape == (72,), f"face_params shape {params['face_params'].shape}"
-    assert params["pred_cam_t"].shape == (3,), f"pred_cam_t shape {params['pred_cam_t'].shape}"
-    assert params["pred_vertices"].shape == (18439, 3), f"vertices shape {params['pred_vertices'].shape}"
-    assert params["pred_keypoints_3d"].shape == (70, 3), f"keypoints_3d shape {params['pred_keypoints_3d'].shape}"
-    assert params["pred_keypoints_2d"].shape == (70, 2), f"keypoints_2d shape {params['pred_keypoints_2d'].shape}"
+    assert params["global_rot"].shape == (3,)
+    assert params["body_pose"].shape == (133,)
+    assert params["shape"].shape == (45,)
+    assert params["scale"].shape == (28,)
+    assert params["hand_pose"].shape == (108,)
+    assert params["face_params"].shape == (72,)
+    assert params["pred_cam_t"].shape == (3,)
+    assert params["pred_vertices"].shape == (18439, 3)
+    assert params["pred_keypoints_3d"].shape == (70, 3)
+    assert params["pred_keypoints_2d"].shape == (70, 2)
 
-    # Save image dimensions
     img = cv2.imread(image_path)
     params["image_h"] = img.shape[0]
     params["image_w"] = img.shape[1]
@@ -322,7 +281,6 @@ def run_python_body_model(model, params, device="cuda"):
     else:
         verts, j3d = out, None
 
-    # Apply coordinate flip (matches Python pipeline convention)
     verts = verts.clone()
     verts[..., [1, 2]] *= -1
 
@@ -396,7 +354,6 @@ def run_cpp_frontend_body_model(model, result, device="cuda",
     hand_pose   = _t(result.hand_pose,  108)
     face_params = _t(result.face_params, 72)
 
-    # Debug: verify the tensors match what we expect
     print(f"  global_rot from FsbResult: {global_rot[0].cpu().numpy()}")
     print(f"  body_pose[0:6] from FsbResult: {body_pose[0, :6].cpu().numpy()}")
 
@@ -429,7 +386,6 @@ def run_cpp_frontend_body_model(model, result, device="cuda",
 
     verts_np = verts[0].cpu().float().numpy()
 
-    # Project 3D keypoints to 2D
     if j3d is not None:
         j3d_np = j3d[0].cpu().float().numpy()
         pred_cam_t = np.array(list(result.pred_cam_t[:3]))
@@ -626,7 +582,6 @@ print(f"  Results saved")
     if result.returncode != 0:
         raise RuntimeError(f"C++ subprocess exited with code {result.returncode}")
 
-    # Load results
     data = np.load(output_npz)
     n = int(data["num_persons"][0])
     print(f"  Loaded {n} result(s) from subprocess")
@@ -749,6 +704,125 @@ def compare_keypoints(py_kps, cpp_kps, label="3D keypoints"):
 
 
 # ────────────────────────────────────────────────────────────────────────────────
+# Side-by-side mesh rendering
+# ────────────────────────────────────────────────────────────────────────────────
+
+def render_side_by_side(py_verts, py_cam_t, cpp_verts, cpp_cam_t, faces,
+                         focal_length, image_w=2250, image_h=1500,
+                         output_path="comparePipelines.jpg"):
+    """
+    Render two meshes side by side on black background using pyrender.
+
+    Each panel is image_w x image_h. The output is 2*image_w x image_h.
+    Left panel  = Python pipeline result  (orange mesh)
+    Right panel = C++ pipeline result     (cyan mesh)
+    """
+    import cv2
+    import pyrender
+    import trimesh
+
+    print_section("Side-by-side mesh rendering")
+    print(f"  Output: {output_path}")
+    print(f"  Each panel: {image_w}x{image_h}")
+
+    def _render_mesh(verts, cam_t, base_color, label):
+        """Render a single mesh on a black background."""
+        black = np.zeros((image_h, image_w, 3), dtype=np.float32)
+
+        renderer = pyrender.OffscreenRenderer(
+            viewport_height=image_h,
+            viewport_width=image_w,
+        )
+
+        camera_translation = cam_t.copy()
+        camera_translation[0] *= -1.0
+
+        material = pyrender.MetallicRoughnessMaterial(
+            metallicFactor=0.0,
+            alphaMode="OPAQUE",
+            baseColorFactor=(base_color[2], base_color[1], base_color[0], 1.0),
+        )
+
+        mesh = trimesh.Trimesh(verts.copy(), faces.copy())
+
+        # 180-degree X rotation (matches Python pipeline convention)
+        rot = trimesh.transformations.rotation_matrix(np.radians(180), [1, 0, 0])
+        mesh.apply_transform(rot)
+
+        mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
+
+        scene = pyrender.Scene(
+            bg_color=[0, 0, 0, 0], ambient_light=(0.4, 0.4, 0.4)
+        )
+        scene.add(mesh, "mesh")
+
+        camera_pose = np.eye(4)
+        camera_pose[:3, 3] = camera_translation
+
+        camera = pyrender.IntrinsicsCamera(
+            fx=focal_length,
+            fy=focal_length,
+            cx=image_w / 2.0,
+            cy=image_h / 2.0,
+            zfar=1e12,
+        )
+        scene.add(camera, pose=camera_pose, name="camera")
+
+        # Add lights
+        thetas = np.pi * np.array([1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0])
+        phis = np.pi * np.array([0.0, 2.0 / 3.0, 4.0 / 3.0])
+        for phi, theta in zip(phis, thetas):
+            xp = np.sin(theta) * np.cos(phi)
+            yp = np.sin(theta) * np.sin(phi)
+            zp = np.cos(theta)
+            z = np.array([xp, yp, zp])
+            z = z / np.linalg.norm(z)
+            x = np.array([-z[1], z[0], 0.0])
+            if np.linalg.norm(x) == 0:
+                x = np.array([1.0, 0.0, 0.0])
+            x = x / np.linalg.norm(x)
+            y = np.cross(z, x)
+            light_pose = np.eye(4)
+            light_pose[:3, :3] = np.c_[x, y, z]
+            scene.add(
+                pyrender.DirectionalLight(color=np.ones(3), intensity=1.0),
+                pose=light_pose,
+            )
+
+        color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        renderer.delete()
+
+        color = color.astype(np.float32) / 255.0
+
+        # Composite onto black background
+        alpha = color[:, :, 3:]
+        result = black.copy()
+        result = result * (1.0 - alpha) + color[:, :, :3] * alpha
+
+        print(f"  {label}: rendered {verts.shape[0]} vertices")
+        return result
+
+    # Python result: warm orange
+    py_panel = _render_mesh(py_verts, py_cam_t,
+                            base_color=(1.0, 0.6, 0.2), label="Python pipeline")
+
+    # C++ result: cool cyan
+    cpp_panel = _render_mesh(cpp_verts, cpp_cam_t,
+                             base_color=(0.2, 0.8, 1.0), label="C++ pipeline")
+
+    # Concatenate side by side
+    combined = np.concatenate([py_panel, cpp_panel], axis=1)
+
+    # Convert to BGR for OpenCV
+    combined_bgr = (combined[:, :, ::-1] * 255).astype(np.uint8)
+
+    cv2.imwrite(output_path, combined_bgr)
+    print(f"  Saved {output_path} ({combined_bgr.shape[1]}x{combined_bgr.shape[0]})")
+
+    return combined_bgr
+
+
+# ────────────────────────────────────────────────────────────────────────────────
 # Save / load params
 # ────────────────────────────────────────────────────────────────────────────────
 
@@ -816,7 +890,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Determine what we can do
     has_python_extraction = args.image is not None
     has_saved_params = args.load_params is not None
 
@@ -842,7 +915,6 @@ def main():
 
     # ── Step 2: Load Python model for body model forward ────────────────────
     if has_saved_params:
-        # Need to load model to run body model
         import torch
         print_section("Loading Python model for body model forward")
         device = args.device
@@ -889,12 +961,12 @@ def main():
     if py_j3d is not None and cpp_output["pred_keypoints_3d"] is not None:
         compare_keypoints(py_j3d, cpp_output["pred_keypoints_3d"], "3D keypoints")
 
-    cpp_results = None
-    cpp_full_results = None
-    ok2 = False
-    ok2_full = False
-    param_ok = False
     # ── Step 6: C++ pipeline roundtrip ──────────────────────────────────────
+    cpp_results = None
+    cpp2_output = None
+    ok2 = False
+    param_ok = False
+
     if not args.skip_cpp_pipeline:
         print()
         print_separator("~", 72)
@@ -961,6 +1033,28 @@ def main():
                     cpp_results[args.person_idx]["kps_2d"],
                     "C++ native 2D keypoints vs Python",
                 )
+
+    # ── Step 7: Side-by-side mesh rendering ─────────────────────────────────
+    print()
+    print_separator("~", 72)
+
+    faces = model.head_pose.faces.cpu().numpy()
+    output_path = os.path.join(_repo_root, "comparePipelines.jpg")
+
+    try:
+        render_side_by_side(
+            py_verts=py_verts,
+            py_cam_t=py_params["pred_cam_t"],
+            cpp_verts=cpp2_output["pred_vertices"] if cpp2_output is not None else py_verts,
+            cpp_cam_t=cpp2_output["pred_cam_t"] if cpp2_output is not None else py_params["pred_cam_t"],
+            faces=faces,
+            focal_length=float(py_params["focal_length"]),
+            image_w=int(py_params.get("image_w", 2250)),
+            image_h=int(py_params.get("image_h", 1500)),
+            output_path=output_path,
+        )
+    except Exception as e:
+        print(f"  SKIP  rendering failed: {e}")
 
     # ── Final summary ───────────────────────────────────────────────────────
     print()
