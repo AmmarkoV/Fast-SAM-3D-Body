@@ -59,6 +59,7 @@ extern "C" {
 
         std::vector<fsb::MHRResult> res = p->process_bgr(bgr, width, height);
         int n = std::min((int)res.size(), max_results);
+        printf("[CAPI] process_bgr returned %d results\n", n);
 
         for (int i = 0; i < n; ++i)
         {

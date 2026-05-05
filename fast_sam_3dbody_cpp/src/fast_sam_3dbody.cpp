@@ -529,8 +529,15 @@ struct Pipeline::Impl
         auto t_total = Clock::now();
 
         // ── camera intrinsics ─────────────────────────────────────────────────
-        float fx = (cfg.focal_x    > 0.f) ? cfg.focal_x    : float(W);
-        float fy = (cfg.focal_y    > 0.f) ? cfg.focal_y    : float(W);
+        // Default matches Python sam_3d_body/data/utils/prepare_batch.py:
+        //   focal = sqrt(W^2 + H^2)        (image diagonal — when no FOV estimator)
+        //   cx, cy = W/2, H/2
+        // This is the value the Python decoder/FFN was trained against; using a
+        // smaller default (e.g. W) produces a wrong condition_info → wrong
+        // global_rot / pred_cam_t / pose params from the FFN.
+        float default_focal = std::sqrt(float(W)*float(W) + float(H)*float(H));
+        float fx = (cfg.focal_x    > 0.f) ? cfg.focal_x    : default_focal;
+        float fy = (cfg.focal_y    > 0.f) ? cfg.focal_y    : default_focal;
         float cx = (cfg.principal_x> 0.f) ? cfg.principal_x: float(W) * 0.5f;
         float cy = (cfg.principal_y> 0.f) ? cfg.principal_y: float(H) * 0.5f;
 
@@ -540,10 +547,21 @@ struct Pipeline::Impl
 
         if (sess_yolo.session)
         {
-            // Resize to YOLO input (640×640 is common)
+            // YOLO11 input: 640×640.
+            // We must match Ultralytics YOLO's default preprocessing (LetterBox):
+            //   resize keeping aspect ratio, then pad to 640×640 with grey (114).
+            // Naive resize to 640×640 stretches a 3:2 image and produces wrong
+            // bboxes that diverge from the Python reference by tens of pixels.
             const int YW = 640, YH = 640;
-            cv::Mat yolo_in;
-            cv::resize(bgr, yolo_in, {YW, YH});
+            float scale = std::min(float(YW) / float(W), float(YH) / float(H));
+            int new_w = (int)std::round(W * scale);
+            int new_h = (int)std::round(H * scale);
+            int pad_x = (YW - new_w) / 2;          // letterbox pad (left)
+            int pad_y = (YH - new_h) / 2;          // letterbox pad (top)
+            cv::Mat resized;
+            cv::resize(bgr, resized, {new_w, new_h}, 0, 0, cv::INTER_LINEAR);
+            cv::Mat yolo_in(YH, YW, CV_8UC3, cv::Scalar(114, 114, 114));
+            resized.copyTo(yolo_in(cv::Rect(pad_x, pad_y, new_w, new_h)));
             // HWC uint8 → CHW float32 [0,1]
             std::vector<float> yolo_buf(3 * YH * YW);
             for (int y = 0; y < YH; ++y)
@@ -595,22 +613,22 @@ struct Pipeline::Impl
                         row_major.assign(raw, raw + nd * 56);
                     }
                 }
-                // scale from YOLO 640×640 space to original image space
-                float sx = float(W) / YW, sy = float(H) / YH;
+                // Reverse the letterbox: YOLO coords → original image coords.
+                //   (x_orig, y_orig) = ((x_yolo - pad_x) / scale, (y_yolo - pad_y) / scale)
                 dets = parse_yolo_output(row_major.data(), nd,
                                          cfg.person_thresh, cfg.person_nms_iou);
                 for (auto& d : dets)
                 {
-                    d.x1 *= sx;
-                    d.x2 *= sx;
-                    d.y1 *= sy;
-                    d.y2 *= sy;
+                    d.x1 = (d.x1 - pad_x) / scale;
+                    d.x2 = (d.x2 - pad_x) / scale;
+                    d.y1 = (d.y1 - pad_y) / scale;
+                    d.y2 = (d.y2 - pad_y) / scale;
                     if (d.has_kps)
                     {
                         for (int k = 0; k < 17; ++k)
                         {
-                            d.kps[k*3 + 0] *= sx;
-                            d.kps[k*3 + 1] *= sy;
+                            d.kps[k*3 + 0] = (d.kps[k*3 + 0] - pad_x) / scale;
+                            d.kps[k*3 + 1] = (d.kps[k*3 + 1] - pad_y) / scale;
                         }
                     }
                 }
@@ -824,8 +842,9 @@ struct Pipeline::Impl
                                 raw_i + 447,  /* face */
                                 verts_out,
                                 joints_out);
+                printf("[FSB] LBS person %d done\n", i);
             }
-            printf("[FSB] LBS:      %.1f ms\n", ms(t0));
+            printf("[FSB] LBS:      %.1f ms, verts=%zu skel=%zu\n", ms(t0), all_verts.size(), all_skel.size());
         }
 
         // ── assemble MHRResult per person ────────────────────────────────────
@@ -990,6 +1009,7 @@ struct Pipeline::Impl
         }
 
         printf("[FSB] total: %.1f ms  (%d persons)\n", ms(t_total), B);
+        printf("[FSB] returning results vector\n");
         return results;
     }
 
