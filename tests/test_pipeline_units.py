@@ -871,15 +871,14 @@ class TestCoordinateSystem:
 class TestCLBSOutput:
     @pytest.fixture(scope="class")
     def c_verts(self):
-        # File format: int32 n_verts, int32 n_floats, float32[n_verts*3]
+        # File format: int32 n_verts, int32 floats_per_vert(=3), float32[n_verts*3]
         with open(CPP_VERTS_BIN, "rb") as f:
-            n_verts  = struct.unpack("i", f.read(4))[0]
-            n_floats = struct.unpack("i", f.read(4))[0]
+            n_verts, floats_per_vert = struct.unpack("ii", f.read(8))
+            n_floats = n_verts * floats_per_vert
             raw = np.frombuffer(f.read(n_floats * 4), dtype=np.float32).copy()
         assert n_verts == 18439, f"cpp_lbs_verts.bin n_verts={n_verts}, expected 18439"
-        assert len(raw) >= n_verts * 3, \
-            f"cpp_lbs_verts.bin too small: {len(raw)} floats for {n_verts} verts"
-        return raw[: n_verts * 3].reshape(n_verts, 3).astype(np.float64)
+        assert floats_per_vert == 3, f"cpp_lbs_verts.bin floats_per_vert={floats_per_vert}, expected 3"
+        return raw.reshape(n_verts, 3).astype(np.float64)
 
     def test_c_verts_finite(self, c_verts):
         assert np.all(np.isfinite(c_verts)), "C LBS verts contain NaN/Inf"
