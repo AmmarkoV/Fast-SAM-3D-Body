@@ -228,6 +228,45 @@ def extract_python_params(image_path, checkpoint_path, mhr_model_path,
     params["image_h"] = img.shape[0]
     params["image_w"] = img.shape[1]
 
+    # Assemble the full 204-vector that mhr_lbs_compute receives.
+    # Mirrors Python mhr_forward: [zeros(3), global_rot, body_pose[:130], scales]
+    # where scales = scale_mean + scale_params @ scale_comps  [68 values]
+    # Hand joints must be PCA-decoded (mirrors replace_hands_in_pose + apply_hand_pose).
+    import torch
+    head = model.head_pose
+    dev  = next(head.parameters()).device
+    scale_t = torch.tensor(params["scale"][None], dtype=torch.float32, device=dev)
+    scales  = (head.scale_mean[None, :] + scale_t @ head.scale_comps).detach().cpu().numpy()[0]
+    mp = np.zeros(204, dtype=np.float32)
+    mp[3:6]    = params["global_rot"]
+    mp[6:136]  = params["body_pose"][:130]
+    mp[136:204] = scales
+
+    # Overwrite hand joint positions with PCA-decoded Euler angles.
+    # Python mhr_forward replaces body_pose hand slots via replace_hands_in_pose;
+    # C++ apply_hand_pose does the same. Without this, the NPZ hand joints are
+    # the raw decoder output instead of the PCA-decoded values mhr_forward uses.
+    hand_pose_mean  = head.hand_pose_mean.detach().cpu().numpy()       # [54]
+    hand_pose_comps = head.hand_pose_comps.detach().cpu().numpy()      # [54×54]
+    hand_idxs_left  = head.hand_joint_idxs_left.detach().cpu().numpy().astype(int)   # [27]
+    hand_idxs_right = head.hand_joint_idxs_right.detach().cpu().numpy().astype(int)  # [27]
+    hand_params     = params["hand_pose"]  # [108]: [:54] left, [54:] right
+
+    from sam_3d_body.models.modules.mhr_utils import compact_cont_to_model_params_hand
+
+    def _decode_hand(h54, idxs27):
+        decoded = hand_pose_mean + h54 @ hand_pose_comps          # [54]
+        decoded_t = torch.tensor(decoded, dtype=torch.float32)
+        euler27 = compact_cont_to_model_params_hand(decoded_t).numpy()  # [27]
+        for i, idx in enumerate(idxs27):
+            if 0 <= idx < 136:
+                mp[idx] = euler27[i]
+
+    _decode_hand(hand_params[:54], hand_idxs_left)
+    _decode_hand(hand_params[54:], hand_idxs_right)
+
+    params["mhr_model_params"] = mp
+
     print(f"\n  Extracted parameter shapes:")
     for k, v in params.items():
         if isinstance(v, np.ndarray):

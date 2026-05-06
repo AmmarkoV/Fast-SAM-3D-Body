@@ -24,8 +24,14 @@ BGR image
   ▼  pipeline.gguf        CPU matmul (ggml)         MHR params [B, 519] + camera [B, 3]
   │   MHR head + camera head weights
   │
-  ▼  body_model.onnx      ONNX Runtime (optional)   vertices [B, 18439, 3]
+  ▼  body_model.lbs       native C LBS (optional)   vertices [18439, 3] in metres
+      extracted once by tools/extract_lbs_data.py
 ```
+
+> **Note:** `body_model.onnx` export is blocked on PyTorch ≥ 2.x (torch.export rejects
+> TorchScript modules). The native C LBS path reads `body_model.lbs` directly and
+> produces identical output to Python `mhr_forward` (body model stores data in cm;
+> `mhr_lbs_compute` applies ×0.01 to match Python's `/100` conversion).
 
 **Per-person output** (`MHRResult` / `FsbResult`):
 
@@ -40,9 +46,11 @@ BGR image
 | `scale` | [28] | Scale PCA components |
 | `hand_pose` | [108] | Hand joints: left [54] + right [54] |
 | `face_params` | [72] | Facial expression parameters |
+| `mhr_model_params` | [204] | Assembled LBS parameter vector (passed to `mhr_lbs_compute`) |
 | `yolo_kps` | [51] | COCO 17 keypoints × [x, y, confidence] |
-| `kps_3d` | [210] | 70 joints × 3 (when body model runs) |
-| `kps_2d` | [140] | 70 joints × 2 projected (when body model runs) |
+| `pred_vertices` | [55317] | 18439 verts × 3, metres (when native C LBS runs) |
+| `kps_3d` | [210] | 70 joints × 3, metres (when native C LBS runs) |
+| `kps_2d` | [140] | 70 joints × 2 projected (when native C LBS runs) |
 
 ---
 
@@ -51,7 +59,7 @@ BGR image
 ```
 fast_sam_3dbody_cpp/
 ├── CMakeLists.txt
-├── export_onnx.py              ONNX export – backbone, decoder, body_model
+├── export_onnx.py              ONNX export – backbone, decoder
 ├── convertModelToGGUF.py       GGUF export – MHR + camera projection heads
 ├── prepare_models.py           One-shot model preparation (runs both scripts above)
 ├── fast_sam_3dbody_frontend.py       Python lightweight frontend (ctypes, no extra deps)
@@ -62,7 +70,10 @@ fast_sam_3dbody_cpp/
 │   ├── decoder.onnx            ~174 MB
 │   ├── pipeline.gguf           ~5 MB
 │   ├── yolo.onnx               ~81 MB
-│   └── body_model.pt           ~664 MB (optional)
+│   ├── body_model.pt           ~664 MB (source for LBS extraction)
+│   └── body_model.lbs          ~27 MB  (native C LBS binary – see tools/extract_lbs_data.py)
+├── scripts/
+│   └── dump_joint_transforms.py  Debug tool – replays LBS forward pass in numpy
 └── src/
     ├── fast_sam_3dbody.h       C++ public API
     ├── fast_sam_3dbody.cpp     Pipeline implementation
@@ -94,6 +105,21 @@ python fast_sam_3dbody_cpp/prepare_models.py --skip onnx   # backbone + decoder 
 python fast_sam_3dbody_cpp/prepare_models.py --skip gguf   # pipeline.gguf already done
 python fast_sam_3dbody_cpp/prepare_models.py --skip yolo   # yolo.onnx already done
 ```
+
+### 1b. Extract native C LBS model
+
+`body_model.onnx` cannot be exported from TorchScript with PyTorch ≥ 2.x.
+The native C LBS path reads a pre-extracted binary instead. Run once after step 1:
+
+```bash
+python tools/extract_lbs_data.py \
+    --model checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \
+    --out   fast_sam_3dbody_cpp/onnx/body_model.lbs
+```
+
+This produces `body_model.lbs` (~27 MB). All LBS data is stored in **centimetres**;
+`mhr_lbs_compute` applies ×0.01 at the end to convert to metres, matching Python
+`mhr_head.py mhr_forward()`.
 
 ### 2. Build
 
@@ -305,7 +331,7 @@ fsb_destroy(h);
 | Backbone (DINOv3-ViT-H) | ~150–200 ms |
 | Decoder (6-layer) | ~20 ms |
 | MHR + camera FFN (CPU) | <1 ms |
-| Body model ONNX (optional) | ~15 ms |
+| Native C LBS (optional) | <1 ms |
 
 - Backbone is the bottleneck; it dominates end-to-end latency.
 - Use `--skip-body` unless 3D vertices are required.
