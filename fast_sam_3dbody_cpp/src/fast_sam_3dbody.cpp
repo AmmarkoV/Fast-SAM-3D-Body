@@ -943,20 +943,14 @@ struct Pipeline::Impl
                     }
                     else
                     {
-                        // ONNX body model output: float32 [B, 127, 8], cm scale
-                        // First 3 floats per joint are position (x,y,z) in cm
+                        // ONNX body model output: float32 [B, 127, 8]
+                        // First 3 floats per joint are world position (x,y,z) in meters.
                         const float* skel_j = all_skel.data() + (size_t)i * 127 * 8;
                         for (int j = 0; j < 127; ++j)
                         {
-                            joint_coords[j*3 + 0] = skel_j[j*8 + 0] * 0.01f;
-                            joint_coords[j*3 + 1] = skel_j[j*8 + 1] * 0.01f;
-                            joint_coords[j*3 + 2] = skel_j[j*8 + 2] * 0.01f;
-                        }
-                        // Flip y,z to match vertex coordinate system
-                        for (int j = 0; j < 127; ++j)
-                        {
-                            joint_coords[j*3 + 1] *= -1.f;
-                            joint_coords[j*3 + 2] *= -1.f;
+                            joint_coords[j*3 + 0] =  skel_j[j*8 + 0];
+                            joint_coords[j*3 + 1] = -skel_j[j*8 + 1];  // y flip
+                            joint_coords[j*3 + 2] = -skel_j[j*8 + 2];  // z flip
                         }
                     }
 
@@ -983,25 +977,21 @@ struct Pipeline::Impl
                         }
                     }
 
-                    // Flip y,z to match vertex coordinate system
-                    for (int k = 0; k < 70; ++k)
-                    {
-                        kps_3d[k*3 + 1] *= -1.f;
-                        kps_3d[k*3 + 2] *= -1.f;
-                    }
-
+                    // kps_3d is already in the camera coordinate system (y,z negated)
+                    // because both verts_ptr and joints_ptr are post-flip inputs.
+                    // No additional flip is needed here.
                     r.keypoints_3d = std::move(kps_3d);
 
                     // Project to 2D: kps_cam = kps_3d + pred_cam_t, then perspective divide
                     std::vector<float> kps_2d(70 * 2);
                     for (int k = 0; k < 70; ++k)
                     {
-                        float dz = kps_3d[k*3 + 2] + r.pred_cam_t[2];
-                        float dx = kps_3d[k*3 + 0] + r.pred_cam_t[0];
-                        float dy = kps_3d[k*3 + 1] + r.pred_cam_t[1];
+                        float dz = r.keypoints_3d[k*3 + 2] + r.pred_cam_t[2];
+                        float dx = r.keypoints_3d[k*3 + 0] + r.pred_cam_t[0];
+                        float dy = r.keypoints_3d[k*3 + 1] + r.pred_cam_t[1];
                         if (dz < 1e-4f) dz = 1e-4f;
                         kps_2d[k*2 + 0] = dx / dz * fx + cx;
-                        kps_2d[k*2 + 1] = dy / dz * fx + cy;
+                        kps_2d[k*2 + 1] = dy / dz * fy + cy;
                     }
                     r.keypoints_2d = std::move(kps_2d);
                 }

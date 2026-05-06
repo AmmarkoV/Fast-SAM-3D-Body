@@ -204,14 +204,18 @@ def main():
     print(f"Summary: {summary_path}")
     print(f"\nConclusion:")
     if dAB.max() > 0.01:
-        print(f"  Correctives cause {dAB.max()*100:.1f}cm vertex shift.")
+        print(f"  Correctives shift vertices by up to {dAB.max()*100:.1f}cm (mean {dAB.mean()*100:.2f}cm).")
     if verts_C is not None:
-        if dBC.max() < 0.001:
-            print("  C-LBS ≡ Python-no-correctives (<1mm). Rendering mismatch is ONLY due to correctives.")
-        elif dBC.max() < 0.01:
-            print(f"  C-LBS ≈ Python-no-correctives ({dBC.max()*1000:.1f}mm). Small LBS code diff.")
+        if dAC.max() < 0.001:
+            print("  *** C-LBS+correctives ≡ Python+correctives (<1mm). Rendering is PIXEL-EQUIVALENT. ***")
+        elif dAC.max() < 0.01:
+            print(f"  C-LBS+correctives ≈ Python+correctives ({dAC.max()*1000:.1f}mm sub-cm). Close enough.")
         else:
-            print(f"  C-LBS DIVERGES from Python-no-correctives ({dBC.max()*100:.1f}cm). LBS code bug!")
+            print(f"  C-LBS+correctives DIVERGES from Python+correctives ({dAC.max()*100:.1f}cm) — needs fix.")
+        if dBC.max() < 0.001:
+            print("  Note: without correctives, C-LBS matches Python (<1mm).")
+        elif dBC.max() > 0.01:
+            print(f"  Note: C-LBS without correctives differs by {dBC.max()*100:.1f}cm (expected — correctives are ON).")
 
 
 if __name__ == "__main__":

@@ -450,6 +450,13 @@ int main(int argc, const char** argv) {
     if (lbs_path.empty()) lbs_path = onnx_dir + "/body_model.lbs";
     struct MHR_LBS_Data* lbs = mhr_lbs_load(lbs_path.c_str());
     if (!lbs) fprintf(stderr, "Warning: LBS data not loaded — mesh will not deform\n");
+    if (lbs) {
+        std::string corr_path = onnx_dir + "/correctives.bin";
+        if (mhr_correctives_load(lbs, corr_path.c_str()))
+            printf("[LBS] pose correctives loaded from %s\n", corr_path.c_str());
+        else
+            printf("[LBS] correctives.bin not found — rendering without pose correctives\n");
+    }
     std::vector<float> lbs_out(MHR_VERTEX_FLOATS, 0.f);
 
     // Empty VAO for the quad (we use gl_VertexID in the vertex shader)
