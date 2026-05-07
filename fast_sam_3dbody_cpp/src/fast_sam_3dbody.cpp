@@ -833,6 +833,23 @@ struct Pipeline::Impl
 
                 ModelParams204 mp = build_model_params(global_rot_euler, body_euler, nullptr, true);
 
+                // Apply hand pose PCA decode (mirrors render binary + Python replace_hands_in_pose)
+                const float* hand_pose = raw_i + 339;  // layout: 6+260+45+28=339
+                apply_hand_pose(mp.data, hand_pose,
+                                lbs_data->hand_pose_mean, lbs_data->hand_pose_comps,
+                                lbs_data->hand_joint_idxs_left, lbs_data->hand_joint_idxs_right);
+
+                // Apply scale decode: scales = scale_mean + scale_params @ scale_comps
+                const float* scale_params = raw_i + 311;  // layout: 6+260+45=311
+                if (lbs_data->scale_mean && lbs_data->scale_comps) {
+                    const int ns = lbs_data->n_scale_out;  // 68
+                    const int np = lbs_data->n_scale_pc;   // 28
+                    for (int j = 0; j < ns; ++j) mp.data[136+j] = lbs_data->scale_mean[j];
+                    for (int k = 0; k < np; ++k)
+                        for (int j = 0; j < ns; ++j)
+                            mp.data[136+j] += scale_params[k] * lbs_data->scale_comps[k * ns + j];
+                }
+
                 float* verts_out  = all_verts.data() + (size_t)i * 18439 * 3;
                 float* joints_out = all_skel.data() + (size_t)i * 127 * 3;
 
@@ -903,13 +920,28 @@ struct Pipeline::Impl
             // Face [72]
             r.face_params.assign(p + 447, p + 447 + 72);
 
-            // Model params [204] for native C LBS
+            // Model params [204] for native C LBS – includes hand pose + scale decode
             {
                 float ge[3];
                 rot6d_to_euler(p, ge);
                 float be[133] = {};
                 compact_cont_to_body_params(p + 6, be);
                 ModelParams204 mp = build_model_params(ge, be, nullptr, true);
+                // Hand pose PCA decode (mirrors Python replace_hands_in_pose)
+                apply_hand_pose(mp.data, p + 339,
+                                lbs_data ? lbs_data->hand_pose_mean   : nullptr,
+                                lbs_data ? lbs_data->hand_pose_comps  : nullptr,
+                                lbs_data ? lbs_data->hand_joint_idxs_left  : nullptr,
+                                lbs_data ? lbs_data->hand_joint_idxs_right : nullptr);
+                // Scale decode: scales = scale_mean + scale_params @ scale_comps
+                if (lbs_data && lbs_data->scale_mean && lbs_data->scale_comps) {
+                    const int ns = lbs_data->n_scale_out;
+                    const int np = lbs_data->n_scale_pc;
+                    for (int j = 0; j < ns; ++j) mp.data[136+j] = lbs_data->scale_mean[j];
+                    for (int k = 0; k < np; ++k)
+                        for (int j = 0; j < ns; ++j)
+                            mp.data[136+j] += p[311+k] * lbs_data->scale_comps[k * ns + j];
+                }
                 std::memcpy(r.mhr_model_params.data(), mp.data, 204 * sizeof(float));
             }
 
@@ -923,12 +955,7 @@ struct Pipeline::Impl
                 size_t off = (size_t)i * 18439 * 3;
                 r.pred_vertices.assign(all_verts.begin() + off,
                                        all_verts.begin() + off + 18439*3);
-                // Flip y,z to match camera system (matches Python code: [1,2] *= -1)
-                for (size_t k = 0; k < 18439; ++k)
-                {
-                    r.pred_vertices[k*3 + 1] *= -1.f;
-                    r.pred_vertices[k*3 + 2] *= -1.f;
-                }
+                // mhr_lbs_compute already applies y,z flip + cm→m — no additional flip needed.
 
                 // Compute 70 MHR keypoints from vertices + skeleton joints
                 if (!kp_mapping.empty())

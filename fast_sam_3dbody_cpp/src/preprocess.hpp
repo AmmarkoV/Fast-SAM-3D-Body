@@ -11,11 +11,14 @@
 namespace fsb {
 
 // ─── image normalisation constants (from model_config.yaml) ──────────────────
-static constexpr float IMAGE_MEAN[3] = {0.485f, 0.456f, 0.406f};
-static constexpr float IMAGE_STD[3]  = {0.229f, 0.224f, 0.225f};
-static constexpr int   CROP_SIZE     = 512;
-static constexpr int   FEAT_HW      = CROP_SIZE / 16;  // 32 – patch grid size
-static constexpr int   PATCH_SIZE   = 16;
+static constexpr float IMAGE_MEAN[3]    = {0.485f, 0.456f, 0.406f};
+static constexpr float IMAGE_STD[3]     = {0.229f, 0.224f, 0.225f};
+static constexpr int   CROP_SIZE        = 512;
+static constexpr int   FEAT_HW          = CROP_SIZE / 16;  // 32 – patch grid size
+static constexpr int   PATCH_SIZE       = 16;
+// BBoxScale padding factor – matches Python transforms BBoxScale(padding=1.25).
+// The crop is expanded by this factor, and condition_info[2] = (bbox_size*1.25) / focal.
+static constexpr float BBOX_SCALE_FACTOR = 1.25f;
 
 // ─── Crop one person out of a BGR image and return normalised CHW float32 ─────
 //
@@ -45,7 +48,8 @@ inline void crop_and_normalise(
     float cy   = (bbox_y1 + bbox_y2) * 0.5f;
     float bw   = bbox_x2 - bbox_x1;
     float bh   = bbox_y2 - bbox_y1;
-    float side = std::max(bw, bh);
+    // Expand by BBOX_SCALE_FACTOR (1.25) to match Python BBoxScale(padding=1.25).
+    float side = std::max(bw, bh) * BBOX_SCALE_FACTOR;
 
     crop_cx      = cx;
     crop_cy      = cy;
