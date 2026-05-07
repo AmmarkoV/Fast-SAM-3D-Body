@@ -5,7 +5,6 @@ from typing import Dict, Optional, Union
 
 import cv2
 import numpy as np
-from detectron2.config import LazyConfig
 from omegaconf import OmegaConf
 
 
@@ -187,6 +186,7 @@ def parse_pose_metainfo(metainfo: Union[str, Dict]):
     if type(metainfo) == str:
         if not os.path.isfile(metainfo):
             raise ValueError("Invalid metainfo file path: ", metainfo)
+        from detectron2.config import LazyConfig
         metainfo = OmegaConf.to_container(LazyConfig.load(metainfo).pose_info)
 
     # check data integrity
