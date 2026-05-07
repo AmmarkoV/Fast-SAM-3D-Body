@@ -17,6 +17,11 @@
 
 set -euo pipefail
 
+
+THISDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$THISDIR"
+cd ..
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/../build"
