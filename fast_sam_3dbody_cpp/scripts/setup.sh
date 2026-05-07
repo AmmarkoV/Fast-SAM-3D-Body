@@ -56,11 +56,39 @@ done
 
 
 
-#-------------------------------------------------------------------------------
-#Todo: improve this ( check if repo already exists and git pull if it does )
-git clone https://github.com/AmmarkoV/RGBDAcquisition
-ln -s RGBDAcquisition/opengl_acquisition_shared_library/opengl_depth_and_color_renderer/src/Library GraphicsEngine
-ln -s RGBDAcquisition/tools/AmMatrix
+# ── External dependency: RGBDAcquisition ───────────────────────────────────────
+_RGBDA_REPO="https://github.com/AmmarkoV/RGBDAcquisition"
+_RGBDA_DIR="RGBDAcquisition"
+
+echo "=== Setting up RGBDAcquisition ==="
+if [[ -d "${_RGBDA_DIR}/.git" ]]; then
+    echo "  Repository already exists — pulling latest …"
+    git -C "${_RGBDA_DIR}" pull --ff-only \
+        || echo "  Warning: git pull failed; continuing with existing checkout."
+else
+    echo "  Cloning ${_RGBDA_REPO} …"
+    git clone "${_RGBDA_REPO}" "${_RGBDA_DIR}"
+fi
+
+_make_symlink() {
+    local link="$1" target="$2"
+    if [[ -L "${link}" ]]; then
+        echo "  Symlink '${link}' already exists — skipping."
+    elif [[ -e "${link}" ]]; then
+        echo "  Warning: '${link}' exists but is not a symlink — skipping."
+    else
+        ln -s "${target}" "${link}"
+        echo "  Created: ${link} → ${target}"
+    fi
+    if [[ ! -e "${link}" ]]; then
+        echo "  Warning: '${link}' target does not exist yet (run after a full clone)."
+    fi
+}
+
+_make_symlink "GraphicsEngine" \
+    "${_RGBDA_DIR}/opengl_acquisition_shared_library/opengl_depth_and_color_renderer/src/Library"
+_make_symlink "AmMatrix" \
+    "${_RGBDA_DIR}/tools/AmMatrix"
 
 
 
