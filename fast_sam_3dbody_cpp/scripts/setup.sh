@@ -54,6 +54,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+
+
+#-------------------------------------------------------------------------------
+#Todo: improve this ( check if repo already exists and git pull if it does )
+git clone https://github.com/AmmarkoV/RGBDAcquisition
+ln -s RGBDAcquisition/opengl_acquisition_shared_library/opengl_depth_and_color_renderer/src/Library GraphicsEngine
+ln -s RGBDAcquisition/tools/AmMatrix
+
+
+
+
 # ── C++ build ──────────────────────────────────────────────────────────────────
 if [[ "${SKIP_BUILD}" -eq 0 ]]; then
     echo "=== Building C++ library and CLI ==="
