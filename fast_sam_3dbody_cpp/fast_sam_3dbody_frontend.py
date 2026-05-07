@@ -252,15 +252,43 @@ def _correct_kps2d(result: FsbResult, frame_h: int, frame_w: int,
     dz = np.maximum(j3d_cam[:, 2:3], 1e-4)
     kps_2d = j3d_cam[:, :2] / dz * fl + np.array([cx, cy])
 
-    # Snap each hand rigidly to the YOLO wrist so fingers follow the body-model
-    # pose but are anchored at the ground-truth wrist pixel position.
+    # Snap each hand to the YOLO wrist, then rotate it around the wrist so the
+    # forearm approach direction (elbow→wrist) matches the YOLO-detected direction.
     # COCO[9]=left_wrist→MHR70[62], COCO[10]=right_wrist→MHR70[41]
-    if float(yolo[9, 2]) >= conf_thresh:
-        delta = yolo[9, :2] - kps_2d[62]
-        kps_2d[42:63] += delta   # left hand joints 42-62
-    if float(yolo[10, 2]) >= conf_thresh:
-        delta = yolo[10, :2] - kps_2d[41]
-        kps_2d[21:42] += delta   # right hand joints 21-41
+    # COCO[7]=left_elbow→MHR70[7],  COCO[8]=right_elbow→MHR70[8]
+    for (wrist_coco, elbow_coco, wrist_mhr, hand_slice) in (
+        (9,  7,  62, slice(42, 63)),   # left hand
+        (10, 8,  41, slice(21, 42)),   # right hand
+    ):
+        if float(yolo[wrist_coco, 2]) < conf_thresh:
+            continue
+
+        mhr_wrist = kps_2d[wrist_mhr].copy()   # body-model wrist before snap
+        yolo_wrist = yolo[wrist_coco, :2]
+
+        # Translate hand to YOLO wrist
+        kps_2d[hand_slice] += yolo_wrist - mhr_wrist
+
+        # Rotate hand around the wrist to align the forearm approach direction.
+        # Pivot: body-model elbow (always available, geometrically consistent).
+        # Reference direction: MHR elbow → YOLO wrist (desired) vs
+        #                      MHR elbow → MHR wrist-before-snap (current).
+        # If YOLO elbow is confident, use it as the pivot instead.
+        mhr_elbow = kps_2d[7 if wrist_mhr == 62 else 8].copy()
+        if float(yolo[elbow_coco, 2]) >= conf_thresh:
+            pivot = yolo[elbow_coco, :2]
+        else:
+            pivot = mhr_elbow
+        mhr_dir  = mhr_wrist - pivot
+        yolo_dir = yolo_wrist - pivot
+        mn, yn = np.linalg.norm(mhr_dir), np.linalg.norm(yolo_dir)
+        if mn > 1e-3 and yn > 1e-3:
+            mhr_dir /= mn;  yolo_dir /= yn
+            cos_a = float(np.clip(np.dot(mhr_dir, yolo_dir), -1.0, 1.0))
+            sin_a = float(mhr_dir[0]*yolo_dir[1] - mhr_dir[1]*yolo_dir[0])
+            R = np.array([[cos_a, -sin_a], [sin_a, cos_a]], dtype=np.float32)
+            rel = kps_2d[hand_slice] - yolo_wrist
+            kps_2d[hand_slice] = yolo_wrist + rel @ R.T
 
     return kps_2d.astype(np.float32)
 
