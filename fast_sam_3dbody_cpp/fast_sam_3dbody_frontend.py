@@ -165,6 +165,9 @@ MHR70_EDGES = [
     (5, 6),               # shoulder bar
     (5, 7),               # left arm
     (6, 8),               # right arm
+    # Forearms (elbow → hand wrist)
+    (7, 62),              # left forearm
+    (8, 41),              # right forearm
     # Head
     (1, 2),               # eyes
     (0, 1), (0, 2),       # nose → eyes
@@ -248,6 +251,17 @@ def _correct_kps2d(result: FsbResult, frame_h: int, frame_w: int,
     j3d_cam = kps_3d + cam_t
     dz = np.maximum(j3d_cam[:, 2:3], 1e-4)
     kps_2d = j3d_cam[:, :2] / dz * fl + np.array([cx, cy])
+
+    # Snap each hand rigidly to the YOLO wrist so fingers follow the body-model
+    # pose but are anchored at the ground-truth wrist pixel position.
+    # COCO[9]=left_wrist→MHR70[62], COCO[10]=right_wrist→MHR70[41]
+    if float(yolo[9, 2]) >= conf_thresh:
+        delta = yolo[9, :2] - kps_2d[62]
+        kps_2d[42:63] += delta   # left hand joints 42-62
+    if float(yolo[10, 2]) >= conf_thresh:
+        delta = yolo[10, :2] - kps_2d[41]
+        kps_2d[21:42] += delta   # right hand joints 21-41
+
     return kps_2d.astype(np.float32)
 
 
