@@ -149,7 +149,7 @@ VIS_THRESHOLD = 0.3   # minimum keypoint visibility to draw
 # 21-41: right hand (thumb→pinky + wrist)
 # 42-62: left hand (thumb→pinky + wrist)
 # 63-69: extra (olecranon, cubital-fossa, acromion, neck)
-_MHR_BODY   = range(0, 21)
+
 _MHR_RHAND  = range(21, 42)
 _MHR_LHAND  = range(42, 63)
 _MHR_EXTRA  = range(63, 70)
@@ -191,7 +191,7 @@ MHR70_EDGES = [
 ]
 
 # Per-region colors (BGR)
-_MHR_BODY_COLOR   = (0, 255, 255)    # cyan
+_MHR_BODY_COLOR   = (255, 255, 0)    # cyan  (BGR: B=255,G=255,R=0 → on-screen cyan)
 _MHR_RHAND_COLOR  = (0, 128, 255)    # blue-orange
 _MHR_LHAND_COLOR  = (0, 255, 0)      # green
 _MHR_EXTRA_COLOR  = (255, 255, 255)  # white
@@ -404,7 +404,6 @@ _PERSON_COLORS = [
 
 def parse_args():
     p = argparse.ArgumentParser(description="SAM-3D-Body Python frontend")
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     onnx = os.path.join(os.path.dirname(os.path.abspath(__file__)), "onnx")
     build = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build")
 
@@ -430,6 +429,8 @@ def parse_args():
                    help="Write visualised output to this file (image or video)")
     p.add_argument("--skip-body",   action="store_true",
                    help="Skip body model (faster, no hand/foot keypoints)")
+    p.add_argument("--visualize-yolo", action="store_true",
+                   help="Overlay YOLO COCO 17-point skeleton (off by default)")
     return p.parse_args()
 
 
@@ -531,7 +532,8 @@ def main():
         for idx, r in enumerate(people):
             color = _PERSON_COLORS[idx % len(_PERSON_COLORS)]
             draw_bbox(vis, r, color=color, idx=idx)
-            draw_skeleton(vis, r, kp_radius=5, edge_thick=2)
+            if args.visualize_yolo:
+                draw_skeleton(vis, r, kp_radius=5, edge_thick=2)
             corrected_kps = _correct_kps2d(r, H, W)
             draw_mhr70(vis, r, kp_radius=2, edge_thick=1, kps_override=corrected_kps)
 
@@ -547,7 +549,19 @@ def main():
         if args.max_skeletons:
             hud += f"  [max {args.max_skeletons}]"
         cv2.putText(vis, hud, (10, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Legend — text colours match what is drawn (BGR)
+        legend = [
+            ("cyan   = MHR70 body",   (255, 255,   0)),   # cyan   (B=255,G=255,R=0)
+            ("green  = MHR70 L-hand", (  0, 255,   0)),   # green
+            ("orange = MHR70 R-hand", (  0, 128, 255)),   # orange
+        ]
+        if args.visualize_yolo:
+            legend.append(("yellow = YOLO keypoints", (0, 255, 255)))  # yellow (B=0,G=255,R=255)
+        for li, (txt, col) in enumerate(legend):
+            cv2.putText(vis, txt, (10, 54 + li * 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
 
         # ── Output ────────────────────────────────────────────────────────────
         if writer:
