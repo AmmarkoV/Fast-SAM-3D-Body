@@ -614,7 +614,7 @@ print(f"  Results saved")
     result = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=False,
-        timeout=120,
+        timeout=600,
         cwd=_repo_root,
     )
 
@@ -650,14 +650,42 @@ print(f"  Results saved")
 # Phase E: Parameter-level comparison (Python vs C++ extracted params)
 # ────────────────────────────────────────────────────────────────────────────────
 
+def _bbox_iou(a, b):
+    """Compute IoU between two [x1,y1,x2,y2] bboxes."""
+    ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    return inter / (area_a + area_b - inter)
+
+
 def compare_params_python_vs_cpp(py_params, cpp_results, person_idx=0):
     """
     Compare the MHR parameters extracted from the Python pipeline
     against those from the C++ pipeline.
+    Matches the Python person to the best-IoU C++ result.
     """
     print_section("Phase E: Comparing MHR parameters (Python vs C++)")
 
-    cpp = cpp_results[person_idx]
+    py_bbox = py_params["bbox"]
+    best_idx = 0
+    best_iou = -1.0
+    for i, r in enumerate(cpp_results):
+        iou = _bbox_iou(py_bbox, r["bbox"])
+        if iou > best_iou:
+            best_iou = iou
+            best_idx = i
+    if best_iou < 0.1:
+        print(f"  WARNING: best C++ bbox IoU={best_iou:.3f} (idx={best_idx}) — "
+              f"may be a different person than Python idx={person_idx}")
+    else:
+        print(f"  Matched C++ person idx={best_idx}  IoU={best_iou:.3f}  "
+              f"(Python person #{person_idx})")
+
+    cpp = cpp_results[best_idx]
     py = py_params
 
     all_ok = True
@@ -1009,6 +1037,17 @@ def main():
     if not args.skip_cpp_pipeline:
         print()
         print_separator("~", 72)
+
+        # Free GPU memory held by PyTorch before spawning C++ subprocess
+        # (avoids CUBLAS_STATUS_ALLOC_FAILED when both processes share the GPU)
+        import gc
+        del model
+        gc.collect()
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
 
         # Try params-only path (skip_body_model=1) - avoids LBS code path
         try:
