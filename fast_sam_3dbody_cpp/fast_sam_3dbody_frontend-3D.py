@@ -158,6 +158,13 @@ def fsb_result_to_output(model, result: FsbResult, frame_h: int, frame_w: int,
     hand_pose   = _t(result.hand_pose,  108)
     face_params = _t(result.face_params, 72)
 
+    # Python's training path always zeroes body_pose[62:116] (mhr_param_hand_idxs)
+    # before replace_hands_in_pose fills the actual hand joints.  C++ compact_cont
+    # fills those positions with values from the continuous representation that the
+    # body model never sees during training — passing them through causes distorted
+    # forearms and feet.  Mirror the Python convention by zeroing them here.
+    body_pose[:, 62:116] = 0.0
+
     with torch.no_grad():
         out = model.head_pose.mhr_forward(
             global_trans=torch.zeros(1, 3, device=device),
