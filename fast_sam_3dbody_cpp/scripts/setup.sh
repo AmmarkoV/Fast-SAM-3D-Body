@@ -136,7 +136,7 @@ if [[ "${SKIP_VENV}" -eq 0 ]]; then
     # timm: ViT layer utilities (drop_path, trunc_normal_)
     # omegaconf + yacs: config loading in sam_3d_body.utils.config
     # huggingface_hub: checkpoint auto-download on first run
-    pip install pyrender trimesh roma einops timm omegaconf yacs huggingface_hub braceexpand pytorch_lightning
+    pip install pyrender trimesh roma einops timm omegaconf yacs huggingface_hub braceexpand pytorch_lightning termcolor
 
     deactivate
 
