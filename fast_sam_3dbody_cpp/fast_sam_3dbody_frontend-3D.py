@@ -98,6 +98,50 @@ def load_library(lib_dir: str) -> ctypes.CDLL:
 # Per-person body model inference + packaging
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _correct_pred_cam_t(pred_cam_t, j3d_np, result, fl, px, py,
+                         conf_thresh=0.3):
+    """
+    Correct tx, ty in pred_cam_t using YOLO 2D keypoints and Python 3D joints.
+
+    The C++ camera head single-pass output has unreliable tx, ty for
+    non-frontal or unusual poses. YOLO gives accurate 2D positions for the
+    17 COCO keypoints, and the first 17 MHR70 joints (j3d_np[:17]) are the
+    same COCO keypoints in 3D body space. Together they linearly constrain:
+        tx_k = (yolo_x[k] - px) * (j3d[k,2] + tz) / fl - j3d[k,0]
+    Averaging over visible joints gives a robust corrected tx, ty.
+    Falls back to a bbox-center estimate when no YOLO kps are available.
+    """
+    tz = float(pred_cam_t[2])
+
+    if result.has_yolo_kps:
+        yolo = np.array(list(result.yolo_kps[:51])).reshape(17, 3)
+        j3d_coco = j3d_np[:17]  # COCO joints in 3D, same order as YOLO
+
+        txs, tys = [], []
+        for k in range(17):
+            conf = float(yolo[k, 2])
+            if conf < conf_thresh:
+                continue
+            d = float(j3d_coco[k, 2]) + tz
+            if d < 1e-3:
+                continue
+            txs.append((float(yolo[k, 0]) - px) * d / fl - float(j3d_coco[k, 0]))
+            tys.append((float(yolo[k, 1]) - py) * d / fl - float(j3d_coco[k, 1]))
+
+        if txs:
+            return np.array([np.mean(txs), np.mean(tys), tz], dtype=np.float32)
+
+    # Fallback: project body root to bbox center
+    bbox = np.array(list(result.bbox[:4]))
+    bbox_cx = (bbox[0] + bbox[2]) * 0.5
+    bbox_cy = (bbox[1] + bbox[3]) * 0.5
+    root = j3d_np[0]  # pelvis ≈ [0,0,0] in body space
+    d = float(root[2]) + tz
+    tx = (bbox_cx - px) * d / fl - float(root[0])
+    ty = (bbox_cy - py) * d / fl - float(root[1])
+    return np.array([tx, ty, tz], dtype=np.float32)
+
+
 def fsb_result_to_output(model, result: FsbResult, frame_h: int, frame_w: int,
                           device: str, principal_x: float, principal_y: float):
     """
@@ -141,16 +185,24 @@ def fsb_result_to_output(model, result: FsbResult, frame_h: int, frame_w: int,
 
     verts_np = verts[0].cpu().float().numpy()   # [18439, 3]
 
-    # C engine already converts raw head output → [tx, ty, tz] (see fast_sam_3dbody.cpp)
-    pred_cam_t = np.array(list(result.pred_cam_t[:3]))
-    bbox       = np.array(list(result.bbox[:4]))
-    fl         = float(result.focal_length)
+    bbox = np.array(list(result.bbox[:4]))
+    fl   = float(result.focal_length)
+    px   = principal_x if principal_x > 0.0 else frame_w * 0.5
+    py   = principal_y if principal_y > 0.0 else frame_h * 0.5
+
+    # Correct tx,ty using YOLO 2D ↔ MHR70 3D COCO joint correspondences.
+    # The C++ single-pass camera head gives unreliable tx,ty; YOLO 2D kps
+    # (same 17 COCO joints as j3d_np[:17]) let us solve for them linearly.
+    if j3d is not None:
+        j3d_np = j3d[0].cpu().float().numpy()   # [70, 3]
+        pred_cam_t = _correct_pred_cam_t(
+            np.array(list(result.pred_cam_t[:3])), j3d_np, result, fl, px, py)
+    else:
+        pred_cam_t = np.array(list(result.pred_cam_t[:3]))
+        j3d_np = None
 
     # Project 3-D keypoints to 2-D image space
-    if j3d is not None:
-        j3d_np  = j3d[0].cpu().float().numpy()          # [70, 3]
-        px = principal_x if principal_x > 0.0 else frame_w * 0.5
-        py = principal_y if principal_y > 0.0 else frame_h * 0.5
+    if j3d_np is not None:
         j3d_cam = j3d_np + pred_cam_t                    # [70, 3]
         dz = np.maximum(j3d_cam[:, 2:3], 1e-4)
         j2d = j3d_cam[:, :2] / dz * fl + np.array([px, py])  # [70, 2]

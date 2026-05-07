@@ -203,13 +203,59 @@ def _mhr_color(idx: int) -> tuple:
     return _MHR_BODY_COLOR
 
 
+def _correct_kps2d(result: FsbResult, frame_h: int, frame_w: int,
+                    conf_thresh: float = 0.3) -> np.ndarray | None:
+    """
+    Return corrected 70×2 kps_2d using YOLO 2D ↔ C++ kps_3d correspondences.
+
+    The C++ pred_cam_t single-pass tx,ty can be inaccurate for unusual poses.
+    YOLO gives correct 2D positions for 17 COCO joints; kps_3d[:17] are the
+    same 17 joints in 3D from C++ LBS. Together they linearly constrain tx,ty
+    given tz, letting us reproject all 70 joints with a corrected translation.
+    Returns None when correction cannot be computed (fall back to raw kps_2d).
+    """
+    if not result.has_kps or not result.has_yolo_kps:
+        return None
+
+    kps_3d = np.array(result.kps_3d, dtype=np.float32).reshape(70, 3)
+    yolo   = np.array(result.yolo_kps, dtype=np.float32).reshape(17, 3)
+    fl     = float(result.focal_length)
+    cx     = frame_w * 0.5
+    cy     = frame_h * 0.5
+    tz     = float(result.pred_cam_t[2])
+
+    txs, tys = [], []
+    for k in range(17):
+        if float(yolo[k, 2]) < conf_thresh:
+            continue
+        d = float(kps_3d[k, 2]) + tz
+        if d < 1e-3:
+            continue
+        txs.append((float(yolo[k, 0]) - cx) * d / fl - float(kps_3d[k, 0]))
+        tys.append((float(yolo[k, 1]) - cy) * d / fl - float(kps_3d[k, 1]))
+
+    if not txs:
+        return None
+
+    tx = float(np.mean(txs))
+    ty = float(np.mean(tys))
+    cam_t = np.array([tx, ty, tz], dtype=np.float32)
+
+    j3d_cam = kps_3d + cam_t
+    dz = np.maximum(j3d_cam[:, 2:3], 1e-4)
+    kps_2d = j3d_cam[:, :2] / dz * fl + np.array([cx, cy])
+    return kps_2d.astype(np.float32)
+
+
 def draw_mhr70(frame: np.ndarray, result: FsbResult,
-               kp_radius: int = 3, edge_thick: int = 1) -> None:
+               kp_radius: int = 3, edge_thick: int = 1,
+               kps_override: np.ndarray | None = None) -> None:
     """Draw 70 MHR keypoints projected to 2D (in-place)."""
     if not result.has_kps:
         return
 
-    kps = np.array(result.kps_2d, dtype=np.float32).reshape(70, 2)
+    kps = kps_override if kps_override is not None else \
+          np.array(result.kps_2d, dtype=np.float32).reshape(70, 2)
     H, W = frame.shape[:2]
 
     # Edges
@@ -433,7 +479,8 @@ def main():
             color = _PERSON_COLORS[idx % len(_PERSON_COLORS)]
             draw_bbox(vis, r, color=color, idx=idx)
             draw_skeleton(vis, r, kp_radius=5, edge_thick=2)
-            draw_mhr70(vis, r, kp_radius=2, edge_thick=1)
+            corrected_kps = _correct_kps2d(r, H, W)
+            draw_mhr70(vis, r, kp_radius=2, edge_thick=1, kps_override=corrected_kps)
 
         if people:
             draw_pose_bars(vis, people)
