@@ -113,20 +113,23 @@ def _correct_pred_cam_t(pred_cam_t, j3d_np, result, fl, px, py,
     """
     tz = float(pred_cam_t[2])
 
+    # COCO index → MHR70 index. MHR70[9]=left_hip (not wrist!); wrists are at 62,41.
+    _COCO_TO_MHR70 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 62, 41, 9, 10, 11, 12, 13, 14]
+
     if result.has_yolo_kps:
         yolo = np.array(list(result.yolo_kps[:51])).reshape(17, 3)
-        j3d_coco = j3d_np[:17]  # COCO joints in 3D, same order as YOLO
 
         txs, tys = [], []
         for k in range(17):
             conf = float(yolo[k, 2])
             if conf < conf_thresh:
                 continue
-            d = float(j3d_coco[k, 2]) + tz
+            j3d_k = j3d_np[_COCO_TO_MHR70[k]]
+            d = float(j3d_k[2]) + tz
             if d < 1e-3:
                 continue
-            txs.append((float(yolo[k, 0]) - px) * d / fl - float(j3d_coco[k, 0]))
-            tys.append((float(yolo[k, 1]) - py) * d / fl - float(j3d_coco[k, 1]))
+            txs.append((float(yolo[k, 0]) - px) * d / fl - float(j3d_k[0]))
+            tys.append((float(yolo[k, 1]) - py) * d / fl - float(j3d_k[1]))
 
         if txs:
             return np.array([np.mean(txs), np.mean(tys), tz], dtype=np.float32)

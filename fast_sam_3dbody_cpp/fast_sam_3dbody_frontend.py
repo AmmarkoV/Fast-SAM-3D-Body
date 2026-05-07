@@ -217,6 +217,9 @@ def _correct_kps2d(result: FsbResult, frame_h: int, frame_w: int,
     if not result.has_kps or not result.has_yolo_kps:
         return None
 
+    # COCO index → MHR70 index. MHR70[9]=left_hip (not wrist!); wrists are at 62,41.
+    _COCO_TO_MHR70 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 62, 41, 9, 10, 11, 12, 13, 14]
+
     kps_3d = np.array(result.kps_3d, dtype=np.float32).reshape(70, 3)
     yolo   = np.array(result.yolo_kps, dtype=np.float32).reshape(17, 3)
     fl     = float(result.focal_length)
@@ -228,11 +231,12 @@ def _correct_kps2d(result: FsbResult, frame_h: int, frame_w: int,
     for k in range(17):
         if float(yolo[k, 2]) < conf_thresh:
             continue
-        d = float(kps_3d[k, 2]) + tz
+        j3d_k = kps_3d[_COCO_TO_MHR70[k]]
+        d = float(j3d_k[2]) + tz
         if d < 1e-3:
             continue
-        txs.append((float(yolo[k, 0]) - cx) * d / fl - float(kps_3d[k, 0]))
-        tys.append((float(yolo[k, 1]) - cy) * d / fl - float(kps_3d[k, 1]))
+        txs.append((float(yolo[k, 0]) - cx) * d / fl - float(j3d_k[0]))
+        tys.append((float(yolo[k, 1]) - cy) * d / fl - float(j3d_k[1]))
 
     if not txs:
         return None
