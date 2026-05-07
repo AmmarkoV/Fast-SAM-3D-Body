@@ -168,11 +168,13 @@ MHR70_EDGES = [
     # Forearms (elbow → hand wrist)
     (7, 62),              # left forearm
     (8, 41),              # right forearm
-    # Head
-    (1, 2),               # eyes
+    # Head & neck (69=neck, 0=nose, 1=l-eye, 2=r-eye, 3=l-ear, 4=r-ear)
+    (1, 2),               # eyes bar
     (0, 1), (0, 2),       # nose → eyes
     (1, 3), (2, 4),       # eyes → ears
-    (3, 5), (4, 6),       # ears → shoulders
+    (69, 0),              # neck → nose      (shows head fwd/tilt)
+    (69, 3), (69, 4),     # neck → ears      (shows head yaw)
+    (69, 5), (69, 6),     # neck → shoulders (neck base)
     # Feet
     (13, 15), (13, 16), (13, 17),  # left foot
     (14, 18), (14, 19), (14, 20),  # right foot
@@ -192,12 +194,18 @@ MHR70_EDGES = [
 
 # Per-region colors (BGR)
 _MHR_BODY_COLOR   = (255, 255, 0)    # cyan  (BGR: B=255,G=255,R=0 → on-screen cyan)
-_MHR_RHAND_COLOR  = (0, 128, 255)    # blue-orange
+_MHR_RHAND_COLOR  = (0, 128, 255)    # orange
 _MHR_LHAND_COLOR  = (0, 255, 0)      # green
+_MHR_HEAD_COLOR   = (0, 165, 255)    # gold/amber  (B=0,G=165,R=255 → on-screen orange-gold)
 _MHR_EXTRA_COLOR  = (255, 255, 255)  # white
 
+# Head joints drawn larger: nose, eyes, ears, neck
+_MHR_HEAD_JOINTS = frozenset([0, 1, 2, 3, 4, 69])
+
 def _mhr_color(idx: int) -> tuple:
-    if idx in _MHR_LHAND:
+    if idx in _MHR_HEAD_JOINTS:
+        return _MHR_HEAD_COLOR
+    elif idx in _MHR_LHAND:
         return _MHR_LHAND_COLOR
     elif idx in _MHR_RHAND:
         return _MHR_RHAND_COLOR
@@ -315,19 +323,21 @@ def draw_mhr70(frame: np.ndarray, result: FsbResult,
     for i, j in MHR70_EDGES:
         pt1 = (int(kps[i, 0]), int(kps[i, 1]))
         pt2 = (int(kps[j, 0]), int(kps[j, 1]))
-        # Cull out-of-frame
         if not (0 <= pt1[0] < W and 0 <= pt1[1] < H and
                 0 <= pt2[0] < W and 0 <= pt2[1] < H):
             continue
+        is_head_edge = i in _MHR_HEAD_JOINTS or j in _MHR_HEAD_JOINTS
         col = _mhr_color(i)
-        cv2.line(frame, pt1, pt2, col, edge_thick, cv2.LINE_AA)
+        thick = edge_thick * 2 if is_head_edge else edge_thick
+        cv2.line(frame, pt1, pt2, col, thick, cv2.LINE_AA)
 
-    # Joints
+    # Joints — head joints drawn at double radius for clarity
     for k in range(70):
         pt = (int(kps[k, 0]), int(kps[k, 1]))
         if not (0 <= pt[0] < W and 0 <= pt[1] < H):
             continue
-        cv2.circle(frame, pt, kp_radius, _mhr_color(k), -1, cv2.LINE_AA)
+        r = kp_radius * 2 if k in _MHR_HEAD_JOINTS else kp_radius
+        cv2.circle(frame, pt, r, _mhr_color(k), -1, cv2.LINE_AA)
 
 
 def draw_skeleton(frame: np.ndarray, result: FsbResult,
@@ -553,12 +563,13 @@ def main():
 
         # Legend — text colours match what is drawn (BGR)
         legend = [
-            ("cyan   = MHR70 body",   (255, 255,   0)),   # cyan   (B=255,G=255,R=0)
+            ("gold   = MHR70 head",   (  0, 165, 255)),   # gold/amber
+            ("cyan   = MHR70 body",   (255, 255,   0)),   # cyan
             ("green  = MHR70 L-hand", (  0, 255,   0)),   # green
             ("orange = MHR70 R-hand", (  0, 128, 255)),   # orange
         ]
         if args.visualize_yolo:
-            legend.append(("yellow = YOLO keypoints", (0, 255, 255)))  # yellow (B=0,G=255,R=255)
+            legend.append(("yellow = YOLO keypoints", (0, 255, 255)))  # yellow
         for li, (txt, col) in enumerate(legend):
             cv2.putText(vis, txt, (10, 54 + li * 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
