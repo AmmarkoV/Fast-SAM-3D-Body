@@ -263,8 +263,15 @@ def _correct_kps2d(result: FsbResult, frame_h: int, frame_w: int,
         if float(yolo[wrist_coco, 2]) < conf_thresh:
             continue
 
-        mhr_wrist = kps_2d[wrist_mhr].copy()   # body-model wrist before snap
+        mhr_wrist  = kps_2d[wrist_mhr].copy()   # body-model wrist before snap
         yolo_wrist = yolo[wrist_coco, :2]
+
+        # Skip if YOLO wrist is implausibly far from body-model wrist — this
+        # indicates a bad YOLO detection (e.g., confused wrist/face keypoints)
+        # rather than a body-model error.  Threshold: 25 % of image height.
+        snap_dist = float(np.linalg.norm(yolo_wrist - mhr_wrist))
+        if snap_dist > 0.25 * frame_h:
+            continue
 
         # Translate hand to YOLO wrist
         kps_2d[hand_slice] += yolo_wrist - mhr_wrist
