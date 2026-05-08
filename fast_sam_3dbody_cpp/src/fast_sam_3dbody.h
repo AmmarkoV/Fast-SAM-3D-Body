@@ -60,6 +60,17 @@ struct MHRResult {
 
     // 2-D YOLO keypoints: 17 COCO joints × [x, y, confidence], image pixel coords
     std::vector<float> keypoints_yolo; // [17 × 3]   always populated if YOLO ran
+
+    // ── Second-pass fields ────────────────────────────────────────────────────
+    // Raw MHR FFN output before Euler conversion.
+    //   [0:6]   global_rot_6d (6D continuous rotation)
+    //   [6:266] body_cont[260] (23×6D + 58×sincos + 6trans)
+    // Used by the Python second-pass to build prev_estimate for forward_decoder.
+    std::array<float, 266> pred_pose_raw{};
+
+    // Raw camera head FFN output [s, tx, ty] before the nonlinear
+    // s/tx/ty → world-space pred_cam_t conversion.
+    std::array<float, 3> pred_cam_raw{};
 };
 
 // ─── Pipeline configuration ───────────────────────────────────────────────────

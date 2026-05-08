@@ -49,6 +49,25 @@ typedef struct {
     float kps_3d[210];      // [70 × 3]
     float kps_2d[140];      // [70 × 2]
     int   has_kps;
+
+    // ── Second-pass fields (added for --two-passes Python second decoder pass) ──
+    //
+    // pred_pose_raw: the raw MHR FFN output BEFORE Euler conversion.
+    //   Layout (mirrors fast_sam_3dbody.cpp parse block ≈ line 755):
+    //     [0:6]    global_rot_6d (6D continuous rotation, Zhou et al. 2019)
+    //     [6:266]  body_cont[260] (23×6D + 58×sincos + 6trans)
+    //   Together these 266 floats form the first part of the second-pass
+    //   prev_estimate tensor: cat(pred_pose_raw, shape, scale, hand, face).
+    //   Shape[45], scale[28], hand[108], face[72] are already in the fields above.
+    //
+    // pred_cam_raw: raw camera head FFN output [3] before the nonlinear
+    //   s/tx/ty → pred_cam_t conversion.  Appended to prev_estimate when the
+    //   loaded Python model has an init_camera attribute.
+    //
+    // IMPORTANT: these fields are appended at the END of FsbResult so that the
+    // ctypes struct layout for older code is not disturbed.
+    float pred_pose_raw[266];  // global_rot_6d[6] + body_cont[260]
+    float pred_cam_raw[3];     // raw cam head output before s/tx/ty decode
 } FsbResult;
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────

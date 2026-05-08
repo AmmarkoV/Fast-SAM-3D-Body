@@ -96,6 +96,13 @@ extern "C" {
                 copy_vec(out.kps_2d, r.keypoints_2d, 140);
                 out.has_kps = 1;
             }
+
+            // ── Second-pass raw fields ─────────────────────────────────────────
+            // pred_pose_raw[266]: global_rot_6d[6] + body_cont[260], needed by
+            // the Python second-pass to reconstruct prev_estimate for forward_decoder.
+            std::memcpy(out.pred_pose_raw, r.pred_pose_raw.data(), 266 * sizeof(float));
+            // pred_cam_raw[3]: raw cam FFN output before s/tx/ty → pred_cam_t.
+            std::memcpy(out.pred_cam_raw,  r.pred_cam_raw.data(),  3   * sizeof(float));
         }
         return n;
     }

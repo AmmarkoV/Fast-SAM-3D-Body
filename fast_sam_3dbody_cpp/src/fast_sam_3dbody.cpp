@@ -876,9 +876,20 @@ struct Pipeline::Impl
 
             r.bbox = { d.x1, d.y1, d.x2, d.y2 };
 
+            // ── Second-pass raw fields ────────────────────────────────────────
+            // Store the raw MHR FFN output (first 266 floats = global_rot_6d[6]
+            // + body_cont[260]) before Euler conversion.  The Python --two-passes
+            // path needs the 6D continuous representation to rebuild prev_estimate
+            // for forward_decoder; the Euler angles already stored in global_rot /
+            // body_pose cannot reconstruct it.
+            std::memcpy(r.pred_pose_raw.data(), p, 266 * sizeof(float));
+
             // Camera: convert raw head output [s, tx, ty] → [tx+cx, ty+cy, tz]
             // Mirrors Python cam_raw_to_pred_cam_t in fast_sam_3dbody_frontend-3D.py
             const float* cam = cam_raw.data() + i * 3;
+            // Also store cam_raw before conversion (needed for prev_estimate when
+            // the Python model has init_camera — appended as extra 3 floats).
+            std::memcpy(r.pred_cam_raw.data(), cam, 3 * sizeof(float));
             {
                 float s_val   = -cam[0];           // sign flip (Python: s = -pred_cam[:,0])
                 float tx      =  cam[1];

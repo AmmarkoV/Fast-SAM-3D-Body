@@ -22,6 +22,9 @@ import time
 import cv2
 import numpy as np
 
+# two_pass is imported lazily inside main() when --two-passes is requested so
+# that this file stays importable without PyTorch installed.  See two_pass.py.
+
 # ──────────────────────────────────────────────────────────────────────────────
 # ctypes structs matching fast_sam_3dbody_capi.h
 # ──────────────────────────────────────────────────────────────────────────────
@@ -58,6 +61,13 @@ class FsbResult(ctypes.Structure):
         ("kps_3d",       ctypes.c_float * 210),
         ("kps_2d",       ctypes.c_float * 140),
         ("has_kps",      ctypes.c_int),
+        # ── Second-pass raw fields (must stay at end — appended after v1 ABI) ──
+        # pred_pose_raw[266]: raw MHR FFN output, layout global_rot_6d[6] + body_cont[260].
+        # pred_cam_raw[3]:    raw cam FFN output [s, tx, ty] before nonlinear decode.
+        # Both are consumed by two_pass.py to build prev_estimate for forward_decoder.
+        # HIGH RISK: any offset here shifts ALL ctypes reads for this struct.
+        ("pred_pose_raw", ctypes.c_float * 266),
+        ("pred_cam_raw",  ctypes.c_float * 3),
     ]
 
 
@@ -441,6 +451,18 @@ def parse_args():
                    help="Skip body model (faster, no hand/foot keypoints)")
     p.add_argument("--visualize-yolo", action="store_true",
                    help="Overlay YOLO COCO 17-point skeleton (off by default)")
+    # ── Second-pass options ───────────────────────────────────────────────────
+    # --two-passes activates the Python second decoder pass (better accuracy).
+    # The C++ first pass still runs; --checkpoint/--mhr-model point to the
+    # Python model assets.  See fast_sam_3dbody_cpp/two_pass.py for details.
+    p.add_argument("--two-passes",  action="store_true",
+                   help="Run Python second decoder pass for better accuracy")
+    p.add_argument("--checkpoint",  default="",
+                   help="Path to model.ckpt (required for --two-passes)")
+    p.add_argument("--mhr-model",   default="",
+                   help="Path to mhr_model.pt (required for --two-passes)")
+    p.add_argument("--two-passes-device", default="cuda",
+                   help="Device for second pass (default: cuda)")
     return p.parse_args()
 
 
@@ -475,6 +497,22 @@ def main():
         lib.fsb_destroy(handle)
         sys.exit("Pipeline load failed")
     print(f"Pipeline ready in {(time.perf_counter()-t0)*1000:.0f} ms")
+
+    # ── Second-pass runner (optional) ─────────────────────────────────────────
+    # Lazy-imported so PyTorch is not required when --two-passes is not used.
+    # The runner wraps the full Python SAM-3D-Body model and handles backbone
+    # re-run, prev_estimate construction, and forward_decoder conditioning.
+    second_pass_runner = None
+    if args.two_passes:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, _here)
+        from two_pass import SecondPassRunner, SecondPassConfig
+        sp_cfg = SecondPassConfig(
+            checkpoint=args.checkpoint,
+            mhr_model=args.mhr_model,
+            device=args.two_passes_device,
+        )
+        second_pass_runner = SecondPassRunner(sp_cfg)
 
     # Result buffer (enough for any realistic number of people per frame)
     MAX_RESULTS = max(args.max_skeletons if args.max_skeletons > 0 else 32, 32)
@@ -539,13 +577,21 @@ def main():
         vis = frame.copy()
         people: list[FsbResult] = [results_buf[i] for i in range(n)]
 
+        # Run second pass if requested — produces better kps_2d per person.
+        # Falls back to C++ one-pass result per person on any failure.
+        second_pass_kps: list = [None] * len(people)
+        if second_pass_runner is not None and people:
+            second_pass_kps = second_pass_runner.run(frame, people)
+
         for idx, r in enumerate(people):
             color = _PERSON_COLORS[idx % len(_PERSON_COLORS)]
             draw_bbox(vis, r, color=color, idx=idx)
             if args.visualize_yolo:
                 draw_skeleton(vis, r, kp_radius=5, edge_thick=2)
-            corrected_kps = _correct_kps2d(r, H, W)
-            draw_mhr70(vis, r, kp_radius=2, edge_thick=1, kps_override=corrected_kps)
+            # Second pass takes priority; fall back to YOLO-corrected one-pass.
+            kps_override = second_pass_kps[idx] if second_pass_kps[idx] is not None \
+                           else _correct_kps2d(r, H, W)
+            draw_mhr70(vis, r, kp_radius=2, edge_thick=1, kps_override=kps_override)
 
         if people:
             draw_pose_bars(vis, people)
@@ -558,6 +604,8 @@ def main():
         hud = f"FPS {fps_ema:.1f}  |  {inf_ms:.0f} ms  |  {n} person(s)"
         if args.max_skeletons:
             hud += f"  [max {args.max_skeletons}]"
+        if second_pass_runner is not None:
+            hud += "  [2-pass]"
         cv2.putText(vis, hud, (10, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
