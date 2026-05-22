@@ -261,19 +261,24 @@ def _simplify(path: str):
         pass
 
 
-def export_backbone(model, out_dir: str, opset: int = 18):
+def export_backbone(model, out_dir: str, opset: int = 18, bf16: bool = False):
     path = os.path.join(out_dir, "backbone.onnx")
-    print(f"\n── backbone → {path}")
+    print(f"\n── backbone → {path}  (dtype={'bfloat16' if bf16 else 'float32'})")
+
+    # The model was trained with BF16 compute (compute_dtype: torch.bfloat16).
+    # Exporting in BF16 matches the training regime and avoids the FP32 vs BF16
+    # precision mismatch that causes arm joint estimation errors in C++ inference.
+    dtype = torch.bfloat16 if bf16 else torch.float32
 
     encoder = model.backbone.encoder
     _patch_encoder(encoder)
     wrapper = BackboneWrapper(encoder)
-    wrapper.eval().float().cuda()
+    wrapper.eval().to(dtype).cuda()
 
-    dummy = torch.randn(1, 3, IMAGE_SIZE, IMAGE_SIZE, device="cuda")
+    dummy = torch.randn(1, 3, IMAGE_SIZE, IMAGE_SIZE, device="cuda", dtype=dtype)
     with torch.no_grad():
         out = wrapper(dummy)
-    print(f"   in {tuple(dummy.shape)}  out {tuple(out.shape)}")
+    print(f"   in {tuple(dummy.shape)}  out {tuple(out.shape)}  dtype={out.dtype}")
 
     torch.onnx.export(
         wrapper, dummy, path,
@@ -288,21 +293,23 @@ def export_backbone(model, out_dir: str, opset: int = 18):
     _simplify(path)
 
 
-def export_decoder(model, out_dir: str, opset: int = 18):
+def export_decoder(model, out_dir: str, opset: int = 18, bf16: bool = False):
     path = os.path.join(out_dir, "decoder.onnx")
-    print(f"\n── decoder → {path}")
+    print(f"\n── decoder → {path}  (dtype={'bfloat16' if bf16 else 'float32'})")
+
+    dtype = torch.bfloat16 if bf16 else torch.float32
 
     wrapper = BodyDecoderWrapper(model)
-    wrapper.eval().cuda()
+    wrapper.eval().to(dtype).cuda()
 
     B = 1
-    feat  = torch.randn(B, BACKBONE_DIM, FEAT_H, FEAT_W, device="cuda")
-    cond  = torch.randn(B, 3,            device="cuda")
-    ray   = torch.randn(B, 2, FEAT_H,   FEAT_W,  device="cuda")  # patch-res rays
+    feat  = torch.randn(B, BACKBONE_DIM, FEAT_H, FEAT_W, device="cuda", dtype=dtype)
+    cond  = torch.randn(B, 3,            device="cuda", dtype=dtype)
+    ray   = torch.randn(B, 2, FEAT_H,   FEAT_W,  device="cuda", dtype=dtype)
 
     with torch.no_grad():
         token = wrapper(feat, cond, ray)
-    print(f"   pose_token shape: {tuple(token.shape)}")
+    print(f"   pose_token shape: {tuple(token.shape)}  dtype={token.dtype}")
 
     torch.onnx.export(
         wrapper,
@@ -366,6 +373,11 @@ def main():
     ap.add_argument("--stage", choices=["backbone", "decoder", "body_model", "all"],
                     default="all")
     ap.add_argument("--opset", type=int, default=18)
+    ap.add_argument("--bf16", action="store_true",
+                    help="Export backbone and decoder in BFloat16 to match the model's "
+                         "training compute dtype. Requires an Ampere or newer GPU (sm_80+) "
+                         "and ORT 1.16+. Fixes arm joint estimation errors caused by the "
+                         "FP32 vs BF16 precision mismatch in the default ONNX export.")
     args = ap.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
@@ -378,10 +390,13 @@ def main():
     model.eval()
     print("Model loaded.")
 
+    if args.bf16:
+        print("\n[--bf16] Exporting backbone and decoder in BFloat16 (matching training precision).")
+
     if args.stage in ("backbone", "all"):
-        export_backbone(model, args.output, args.opset)
+        export_backbone(model, args.output, args.opset, bf16=args.bf16)
     if args.stage in ("decoder", "all"):
-        export_decoder(model, args.output, args.opset)
+        export_decoder(model, args.output, args.opset, bf16=args.bf16)
     if args.stage in ("body_model", "all"):
         export_body_model(model, args.output, args.opset)
 

@@ -357,11 +357,165 @@ def phase_c(frame_bgr):
     print(f"  max    |Δ| (all 70 joints): {dist.max():.1f} px")
 
 
+# ─── Phase D: pred_pose_raw comparison (ONNX vs PyTorch) ─────────────────────
+#
+# This phase answers: "Is the arm bending a code bug or a model quality issue?"
+#
+# Strategy:
+#   1. C++ pipeline (ONNX FP16) → r.pred_pose_raw[266], r.body_pose[133], r.bbox
+#   2. Python pipeline (PyTorch BF16) with the SAME bbox → pred_pose_raw[266], body_pose[133]
+#   3. Compare body_cont section (pred_pose_raw[6:266]) and body_pose[133]
+#      element-by-element to isolate which joints drive the difference.
+#
+# If the body_pose arrays differ significantly, the models produce different
+# pose estimates → quality/model issue.  If they agree but the render still
+# looks wrong, look for a code bug in build_model_params or mhr_lbs_compute.
+
+def phase_d(frame_bgr):
+    print("\n" + "="*70)
+    print("PHASE D — pred_pose_raw comparison: ONNX(C++) vs PyTorch(Python)")
+    print("  Goal: distinguish model quality differences from code bugs")
+    print("="*70)
+
+    # ── C++ pass ──────────────────────────────────────────────────────────────
+    print("\n[1/2] Running C++ pipeline (ONNX FP16)...")
+    lib, h, FsbResult = _load_cpp()
+    results = _run_cpp(lib, h, FsbResult, frame_bgr)
+    lib.fsb_destroy(h)
+
+    if not results:
+        print("  No C++ detections — supply an image with a visible person")
+        return
+
+    r = results[0]
+    cpp_raw   = np.array(r.pred_pose_raw, dtype=np.float32)   # [266]
+    cpp_body  = np.array(r.body_pose,     dtype=np.float32)   # [133]
+    cpp_glob  = np.array(r.global_rot,    dtype=np.float32)   # [3]
+    bbox      = np.array(r.bbox,          dtype=np.float32)   # [4] xyxy
+
+    print(f"  C++ bbox: {bbox.round(1)}")
+    print(f"  C++ global_rot (rz,ry,rx): {cpp_glob.round(4)}")
+    print(f"  C++ body_pose[0:6]: {cpp_body[:6].round(4)}")
+
+    # ── Python pass (same bbox) ────────────────────────────────────────────────
+    print("\n[2/2] Running Python estimator (PyTorch BF16) with same bbox...")
+    from sam_3d_body.sam_3d_body_estimator import SAM3DBodyEstimator
+    model, model_cfg, device = _load_python_model()
+    est = SAM3DBodyEstimator(model, model_cfg)
+
+    img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    outputs = est.process_one_image(img_rgb,
+                                    bboxes=bbox[np.newaxis, :],
+                                    inference_type="body")
+    if not outputs:
+        print("  Python estimator returned no outputs")
+        return
+
+    out = outputs[0]
+    py_raw_t  = out.get("pred_pose_raw")
+    py_body_t = out.get("body_pose_params") if "body_pose_params" in out else out.get("body_pose")
+    py_glob_t = out.get("global_rot")
+
+    import torch
+    def to_np(t):
+        if t is None: return None
+        if isinstance(t, np.ndarray): return t.flatten().astype(np.float32)
+        return t.detach().cpu().numpy().flatten().astype(np.float32)
+
+    py_raw  = to_np(py_raw_t)   # [266]
+    py_body = to_np(py_body_t)  # [133]
+    py_glob = to_np(py_glob_t)  # [3]
+
+    if py_raw is None or py_body is None:
+        print("  Python output dict missing pred_pose_raw / body_pose keys")
+        print(f"  Available keys: {list(out.keys())}")
+        return
+
+    print(f"  Py  global_rot (rz,ry,rx): {py_glob.round(4) if py_glob is not None else 'N/A'}")
+    print(f"  Py  body_pose[0:6]: {py_body[:6].round(4)}")
+
+    # ── body_cont comparison (pred_pose_raw[6:266]) ────────────────────────────
+    cpp_cont = cpp_raw[6:266]   # [260] body_cont
+    py_cont  = py_raw[6:266]    # [260]
+
+    cont_diff  = np.abs(py_cont - cpp_cont)
+    print(f"\n--- body_cont[260] (pred_pose_raw[6:266]) ---")
+    print(f"  median |Δ|: {np.median(cont_diff):.4f}")
+    print(f"  mean   |Δ|: {cont_diff.mean():.4f}")
+    print(f"  max    |Δ|: {cont_diff.max():.4f}  (idx {cont_diff.argmax()})")
+    top5c = np.argsort(cont_diff)[-5:][::-1]
+    print(f"  top-5 worst body_cont indices: "
+          f"{list(zip(top5c.tolist(), cont_diff[top5c].round(4).tolist()))}")
+
+    # The 3-DOF region is body_cont[0:138] (23 joints × 6).
+    # Joints 0-7 (body_cont[0:48]) are typically spine/hips/shoulders.
+    # Show per-joint L2 for the first 14 3-DOF joints (pre-hand range).
+    print("\n  3-DOF joints (body_cont groups of 6, joints 0-12):")
+    for jj in range(13):
+        sl = slice(jj*6, jj*6+6)
+        d = np.linalg.norm(py_cont[sl] - cpp_cont[sl])
+        print(f"    joint3dof[{jj:2d}] (cont[{jj*6}:{jj*6+6}]): |Δ|_L2={d:.4f}  "
+              f"cpp={cpp_cont[sl].round(3)}  py={py_cont[sl].round(3)}")
+
+    # ── body_pose (euler) comparison [133] ────────────────────────────────────
+    body_diff = np.abs(py_body - cpp_body)
+    print(f"\n--- body_pose[133] (euler angles) ---")
+    print(f"  median |Δ|: {np.median(body_diff):.4f} rad")
+    print(f"  mean   |Δ|: {body_diff.mean():.4f} rad")
+    print(f"  max    |Δ|: {body_diff.max():.4f} rad  (idx {body_diff.argmax()})")
+    top5b = np.argsort(body_diff)[-5:][::-1]
+    print(f"  top-5 worst body_pose indices: "
+          f"{list(zip(top5b.tolist(), body_diff[top5b].round(4).tolist()))}")
+
+    # Show arm-adjacent euler indices (pre-hand range [0:62])
+    print("\n  body_pose[0:62] (non-hand DOFs) comparison:")
+    for i in range(62):
+        d = body_diff[i]
+        if d > 0.1:  # only print significant differences (>0.1 rad ≈ 6°)
+            print(f"    [{i:3d}]: Δ={py_body[i]-cpp_body[i]:+.4f} rad  "
+                  f"(cpp={cpp_body[i]:.4f}, py={py_body[i]:.4f})")
+
+    # ── global_rot comparison ─────────────────────────────────────────────────
+    if py_glob is not None:
+        print(f"\n--- global_rot[3] (ZYX: rz,ry,rx) ---")
+        print(f"  C++: {cpp_glob.round(4)}")
+        print(f"  Py:  {py_glob.round(4)}")
+        print(f"  |Δ|: {np.abs(py_glob - cpp_glob).round(4)}")
+
+    # ── verdict ───────────────────────────────────────────────────────────────
+    # Root cause: backbone.onnx was exported with .float() (FP32) but the model
+    # was trained with compute_dtype=bfloat16.  The FP32 ONNX backbone produces
+    # slightly different image tokens than Python BF16, which propagates through
+    # the decoder FFN and manifests as direction errors in the 6D rotation vectors
+    # for certain body joints (especially 1-DOF joints at indices 27-58).
+    #
+    # Fix 1 (recommended): Use two_pass.py — C++ for detection, Python BF16 for
+    #         body estimation.  Already implemented in fast_sam_3dbody_frontend.py.
+    # Fix 2 (pure C++): Re-export ONNX in BF16 to match training precision:
+    #         python fast_sam_3dbody_cpp/export_onnx.py --bf16 --stage backbone
+    #         python fast_sam_3dbody_cpp/export_onnx.py --bf16 --stage decoder
+    #         (Requires Ampere+ GPU and ORT 1.16+)
+    mean_body_diff_deg = np.degrees(body_diff[:62].mean())
+    print(f"\n--- Verdict ---")
+    print(f"  Mean arm/torso body_pose diff: {mean_body_diff_deg:.1f} deg")
+    if mean_body_diff_deg < 5.0:
+        print("  AGREE: ONNX and PyTorch produce similar body_pose.")
+        print("  → Arm issue is NOT a precision mismatch; check build_model_params / render code.")
+    elif mean_body_diff_deg < 20.0:
+        print("  PARTIAL: FP32 ONNX vs BF16 PyTorch causes moderate body_pose differences.")
+        print("  → Root cause: backbone.onnx exported in FP32 but model trained with BF16.")
+        print("  → Fix: use --two-passes (frontend) or re-export with: export_onnx.py --bf16")
+    else:
+        print("  DISAGREE: FP32 ONNX vs BF16 PyTorch causes large body_pose differences.")
+        print("  → Root cause: backbone.onnx exported in FP32 but model trained with BF16.")
+        print("  → Fix: use --two-passes (frontend) or re-export with: export_onnx.py --bf16")
+
+
 # ─── entry point ──────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(description="Systematic C++/Python parity tests")
-    ap.add_argument("--phase", choices=["A", "B", "C", "all"], default="all")
+    ap.add_argument("--phase", choices=["A", "B", "C", "D", "all"], default="all")
     ap.add_argument("--image", default="",
                     help="Path to test image (uses grey frame if not set)")
     args = ap.parse_args()
@@ -394,6 +548,9 @@ def main():
 
     if args.phase in ("C", "all"):
         run(phase_c, frame)
+
+    if args.phase in ("D", "all"):
+        run(phase_d, frame)
 
 
 if __name__ == "__main__":
