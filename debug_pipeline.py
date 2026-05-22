@@ -255,15 +255,16 @@ def phase_a(frame_bgr):
 
 # ─── Phase B: Single-DOF sweep ────────────────────────────────────────────────
 
-def phase_b(phase_a_result=None):
+def phase_b(phase_a_result=None, frame_bgr=None):
     print("\n" + "="*70)
     print("PHASE B — Single-DOF sweep: vary body_cont[6] (left elbow angle)")
     print("="*70)
 
     if phase_a_result is None:
         print("  Phase A not run — loading model and running C++ pass...")
-        frame = np.full((720, 1280, 3), 128, dtype=np.uint8)
-        result = phase_a(frame)
+        if frame_bgr is None:
+            frame_bgr = np.full((720, 1280, 3), 128, dtype=np.uint8)
+        result = phase_a(frame_bgr)
         if result is None:
             print("  No detections — provide a frame with a person")
             return
@@ -389,7 +390,7 @@ def main():
         phase_a_result = run(phase_a, frame)
 
     if args.phase in ("B", "all"):
-        run(phase_b, phase_a_result)
+        run(phase_b, phase_a_result, frame)
 
     if args.phase in ("C", "all"):
         run(phase_c, frame)

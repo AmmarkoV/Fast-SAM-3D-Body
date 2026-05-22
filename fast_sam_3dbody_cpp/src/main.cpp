@@ -27,7 +27,8 @@ struct Config
     int         cuda_device = 0;
     bool        use_trt     = false;
     bool        fp16        = true;
-    bool        skip_body   = false;
+    bool        skip_body      = false;
+    bool        zero_face      = false;
     float       person_thresh  = 0.50f;
     float       person_nms_iou = 0.45f;
     float       focal_x        = 0.f;
@@ -49,6 +50,7 @@ static void print_usage(const char* prog)
     printf("  --trt             Enable ONNX Runtime TensorRT EP\n");
     printf("  --no-fp16         Disable FP16 for ONNX EP\n");
     printf("  --skip-body       Skip body model (no vertices / keypoints)\n");
+    printf("  --zero-face       Force face expression params to zero (neutral face, debug)\n");
     printf("  --thresh T        YOLO person confidence threshold (default 0.50)\n");
     printf("  --nms T           YOLO NMS IoU threshold (default 0.45)\n");
     printf("  --fx F            Camera focal length x (0 = image width)\n");
@@ -92,6 +94,11 @@ static Config parse_args(int argc, char** argv)
         if (!strcmp(argv[i], "--skip-body"))
         {
             c.skip_body = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--zero-face"))
+        {
+            c.zero_face = true;
             continue;
         }
         if (!strcmp(argv[i], "--headless"))
@@ -162,7 +169,8 @@ int main(int argc, char** argv)
     pcfg.cuda_device    = c.cuda_device;
     pcfg.use_trt_ep     = c.use_trt;
     pcfg.use_fp16       = c.fp16;
-    pcfg.skip_body_model = c.skip_body;
+    pcfg.skip_body_model  = c.skip_body;
+    pcfg.zero_face_params = c.zero_face;
     pcfg.person_thresh  = c.person_thresh;
     pcfg.person_nms_iou = c.person_nms_iou;
     pcfg.focal_x        = c.focal_x;

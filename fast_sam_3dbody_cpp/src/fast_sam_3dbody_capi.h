@@ -26,6 +26,7 @@ typedef struct {
     float focal_y;
     float principal_x;
     float principal_y;
+    int   zero_face_params;   // 0/1  — force face expression coefficients to zero
 } FsbConfig;
 
 // ── Per-person result (fixed-size for easy ctypes mapping) ────────────────────

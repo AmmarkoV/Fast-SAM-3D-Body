@@ -772,7 +772,9 @@ struct Pipeline::Impl
                 // Copy into batch buffers
                 std::memcpy(batch_shape.data()   + i * 45,  shape, 45  * sizeof(float));
                 std::memcpy(batch_bparams.data() + i * 204, mp.data, 204 * sizeof(float));
-                std::memcpy(batch_face.data()    + i * 72,  face,  72  * sizeof(float));
+                if (!cfg.zero_face_params)
+                    std::memcpy(batch_face.data() + i * 72, face, 72 * sizeof(float));
+                // else: batch_face stays zero-initialised → neutral expression
             }
 
             std::vector<int64_t> shape_sh  {B, 45};
@@ -853,10 +855,11 @@ struct Pipeline::Impl
                 float* verts_out  = all_verts.data() + (size_t)i * 18439 * 3;
                 float* joints_out = all_skel.data() + (size_t)i * 127 * 3;
 
+                static const float zero_face[72] = {};
                 mhr_lbs_compute(lbs_data,
                                 mp.data,
                                 raw_i + 266,  /* shape */
-                                raw_i + 447,  /* face */
+                                cfg.zero_face_params ? zero_face : raw_i + 447,  /* face */
                                 verts_out,
                                 joints_out);
                 printf("[FSB] LBS person %d done\n", i);

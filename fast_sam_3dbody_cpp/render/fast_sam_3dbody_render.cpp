@@ -357,9 +357,10 @@ int main(int argc, const char** argv) {
     std::string lbs_path  = "";
     std::string src       = "0";
     std::string save_path = "";
-    int  cuda_device = 0;
-    bool use_trt  = false;
-    bool fp16     = true;
+    int  cuda_device  = 0;
+    bool use_trt      = false;
+    bool fp16         = true;
+    bool zero_face    = false;
 
     for (int i = 1; i < argc; ++i) {
 #define A1(flag, field, conv) \
@@ -373,8 +374,9 @@ int main(int argc, const char** argv) {
         A1("--save",     save_path, std::string)
         A1("--cuda",     cuda_device, std::stoi)
 #undef A1
-        if (!strcmp(argv[i], "--trt"))     { use_trt = true;  continue; }
-        if (!strcmp(argv[i], "--no-fp16")) { fp16    = false; continue; }
+        if (!strcmp(argv[i], "--trt"))       { use_trt    = true;  continue; }
+        if (!strcmp(argv[i], "--no-fp16"))   { fp16       = false; continue; }
+        if (!strcmp(argv[i], "--zero-face")) { zero_face  = true;  continue; }
     }
 
     // ── Pipeline ─────────────────────────────────────────────────────────────
@@ -561,10 +563,11 @@ int main(int argc, const char** argv) {
             }
 
             // Run native C LBS forward pass, stream result to GPU
+            static const float zero_face_buf[72] = {};
             mhr_lbs_compute(lbs,
                             mp.data(),
                             r.shape.data(),
-                            r.face_params.data(),
+                            zero_face ? zero_face_buf : r.face_params.data(),
                             lbs_out.data(),
                             nullptr);
             mhr_update_mesh_vertices(tri_model, lbs_out.data());

@@ -43,6 +43,7 @@ class FsbConfig(ctypes.Structure):
         ("focal_y",        ctypes.c_float),
         ("principal_x",    ctypes.c_float),
         ("principal_y",    ctypes.c_float),
+        ("zero_face_params", ctypes.c_int),  # 0/1 — force face expression to neutral
     ]
 
 class FsbResult(ctypes.Structure):
@@ -449,6 +450,8 @@ def parse_args():
                    help="Write visualised output to this file (image or video)")
     p.add_argument("--skip-body",   action="store_true",
                    help="Skip body model (faster, no hand/foot keypoints)")
+    p.add_argument("--zero-face",   action="store_true",
+                   help="Force face expression params to zero (neutral face, for debugging)")
     p.add_argument("--visualize-yolo", action="store_true",
                    help="Overlay YOLO COCO 17-point skeleton (off by default)")
     # ── Second-pass options ───────────────────────────────────────────────────
@@ -485,10 +488,11 @@ def main():
         person_thresh  = args.thresh,
         person_nms_iou = args.nms,
         max_persons    = args.max_skeletons,
-        focal_x        = args.fx,
-        focal_y        = args.fy,
-        principal_x    = args.cx,
-        principal_y    = args.cy,
+        focal_x          = args.fx,
+        focal_y          = args.fy,
+        principal_x      = args.cx,
+        principal_y      = args.cy,
+        zero_face_params = 1 if args.zero_face else 0,
     )
 
     print("Loading pipeline …")

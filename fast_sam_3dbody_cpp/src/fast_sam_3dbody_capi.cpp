@@ -43,6 +43,7 @@ extern "C" {
         pc.focal_y          = cfg->focal_y;
         pc.principal_x      = cfg->principal_x;
         pc.principal_y      = cfg->principal_y;
+        pc.zero_face_params = cfg->zero_face_params != 0;
 
         return p->load(pc) ? 1 : 0;
     }

@@ -96,6 +96,9 @@ struct PipelineConfig {
     float focal_y = 0.f;
     float principal_x = 0.f;       // 0 = image_width  / 2
     float principal_y = 0.f;       // 0 = image_height / 2
+
+    // Debug / diagnostic flags
+    bool zero_face_params = false;  // Force face expression coefficients to 0 (useful to isolate face expression errors)
 };
 
 // ─── Pipeline class ───────────────────────────────────────────────────────────
