@@ -109,11 +109,27 @@ class SecondPassRunner:
         if not cfg.checkpoint:
             raise ValueError("[two_pass] SecondPassConfig.checkpoint must be set")
 
-        # Resolve device: honour the request but fall back to CPU gracefully.
+        # HIGH RISK: sam_3d_body_estimator.py line 328 hardcodes
+        #   batch = recursive_to(batch, "cuda")
+        # so the inference batch ALWAYS runs on CUDA regardless of what device is
+        # passed to load_sam_3d_body.  If the model is on CPU but the batch is on
+        # CUDA, data_preprocess crashes with a device mismatch on image_mean.
+        # Resolution:
+        #   • When CUDA is available — ALWAYS use CUDA (matches estimator's assumption).
+        #   • When CUDA is absent   — keep CPU (recursive_to to "cuda" becomes a no-op
+        #     on a CPU-only build of PyTorch, so CPU inference works there).
         if cfg.device == "cuda" and not torch.cuda.is_available():
             warnings.warn("[two_pass] CUDA not available, falling back to CPU "
                           "(second pass will be slower)")
             cfg.device = "cpu"
+        elif cfg.device == "cpu" and torch.cuda.is_available():
+            warnings.warn(
+                "[two_pass] sam_3d_body_estimator always moves the inference batch "
+                "to CUDA (hardcoded).  Overriding device='cpu' to 'cuda' to avoid "
+                "the device mismatch in data_preprocess.  To run purely on CPU, "
+                "use a machine without a CUDA-capable GPU."
+            )
+            cfg.device = "cuda"
 
         print(f"[two_pass] Loading Python model from {cfg.checkpoint} …")
         t0 = time.perf_counter()
