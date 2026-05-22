@@ -1,0 +1,31 @@
+# NVIDIA driver reads past buffer boundary during glTexImage2D unpack.
+# The driver copies texture data via a memfd and may read 1-2 extra bytes
+# for internal SIMD alignment. This is a known Valgrind + NVIDIA false positive.
+{
+   NVIDIA glTexImage2D unpack overread
+   Memcheck:Addrd
+   fun:*glTexImage2D*
+   obj:/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.*
+   obj:/usr/lib/x86_64-linux-gnu/libGLX.so.*
+   obj:/usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.*
+}
+
+{
+   NVIDIA dlopen realloc size 0
+   Memcheck:Param
+   realloc(size)
+   fun:dlopen*
+   obj:/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.*
+   obj:/usr/lib/x86_64-linux-gnu/libGLX.so.*
+   obj:/usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.*
+}
+
+{
+   NVIDIA dlopen posix_memalign invalid size
+   Memcheck:Param
+   posix_memalign(alignment, size)
+   fun:dlopen*
+   obj:/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.*
+   obj:/usr/lib/x86_64-linux-gnu/libGLX.so.*
+   obj:/usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.*
+}
