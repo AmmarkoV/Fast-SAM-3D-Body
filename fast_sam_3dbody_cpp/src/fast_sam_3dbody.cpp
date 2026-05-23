@@ -824,8 +824,8 @@ struct Pipeline::Impl
                 const float* raw_i = mhr_raw.data() + i * NPOSE;
                 const float* global_rot_6d = raw_i;
                 const float* body_cont     = raw_i + 6;
-                const float* shape         = raw_i + 266;
-                const float* face          = raw_i + 447;
+                //const float* shape         = raw_i + 266;
+                //const float* face          = raw_i + 447;
 
                 float global_rot_euler[3];
                 rot6d_to_euler(global_rot_6d, global_rot_euler);
