@@ -31,6 +31,7 @@ extern "C" {
 #include <cstring>
 #include <string>
 #include <vector>
+#include <time.h>
 
 // ── Inline GLSL shaders ──────────────────────────────────────────────────────
 
@@ -495,6 +496,10 @@ int main(int argc, const char** argv) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     // ── Render loop ───────────────────────────────────────────────────────────
+#define NS_NOW() ({ struct timespec _t; clock_gettime(CLOCK_MONOTONIC,&_t); (long long)_t.tv_sec*1000000000LL + _t.tv_nsec; })
+    long long t_last_frame = NS_NOW();
+    double    fps_ema      = 0.0;
+
     cv::Mat frame;
     while (glx3_checkEvents()) 
     {
@@ -508,7 +513,9 @@ int main(int argc, const char** argv) {
         }
 
         // Inference
+        long long t_infer = NS_NOW();
         auto results = pipeline.process_bgr(frame.data, frame.cols, frame.rows);
+        double latency_ms = (NS_NOW() - t_infer) / 1e6;
 
         // Annotate frame: draw YOLO skeleton when LBS mesh is unavailable.
         cv::Mat vis = frame.clone();
@@ -606,6 +613,7 @@ int main(int argc, const char** argv) {
               }
             }
 
+#if 0 /* DEBUG: vertex bounds in model space — re-enable to diagnose mesh placement */
             // Debug: print vertex bounds in model space
             { float xmin=1e9f,xmax=-1e9f,ymin=1e9f,ymax=-1e9f,zmin=1e9f,zmax=-1e9f;
               for (int i=0; i<MHR_VERTEX_FLOATS; i+=3) {
@@ -619,6 +627,7 @@ int main(int argc, const char** argv) {
               printf("[mesh] model bounds: x[%.3f,%.3f] y[%.3f,%.3f] z[%.3f,%.3f]\n",
                      xmin,xmax, ymin,ymax, zmin,zmax);
             }
+#endif
 
             glBindBuffer(GL_ARRAY_BUFFER, mesh_gpu.vbo_pos);
             glBufferSubData(GL_ARRAY_BUFFER, 0,
@@ -638,10 +647,11 @@ int main(int argc, const char** argv) {
             //view[12]=0.0; view[13]=0.0; view[14]=0.0; view[15]=1.0;
             mat4_mul(mvp, proj, view);
             //mat4_transpose(mvp);
-            mat4_print("Projection",proj);
-            mat4_print("View",view);
-            mat4_print("MVP",mvp);
+            //mat4_print("Projection",proj);
+            //mat4_print("View",view);
+            //mat4_print("MVP",mvp);
 
+#if 0 /* DEBUG: view-space and clip-space bounds — re-enable to diagnose projection/clipping */
             // Debug: view-space and clip-space bounds
             { float vxmin=1e9f,vxmax=-1e9f,vymin=1e9f,vymax=-1e9f,vzmin=1e9f,vzmax=-1e9f;
               float cxmin=1e9f,cxmax=-1e9f,cymin=1e9f,cymax=-1e9f,czmin=1e9f,czmax=-1e9f,cwmin=1e9f,cwmax=-1e9f;
@@ -677,6 +687,7 @@ int main(int argc, const char** argv) {
                      cymin/cwmax, cymax/cwmin,
                      czmin/cwmax, czmax/cwmin);
             }
+#endif
 
             glUniformMatrix4fv(mvp_loc, 1, GL_FALSE, mvp);
 
@@ -690,6 +701,17 @@ int main(int argc, const char** argv) {
         glBindVertexArray(0);
 
         glx3_endRedraw();
+
+        // Status line: FPS (EMA), inference latency, subjects in view
+        { long long t_now   = NS_NOW();
+          double frame_ms   = (t_now - t_last_frame) / 1e6;
+          t_last_frame      = t_now;
+          fps_ema = (fps_ema == 0.0) ? (1000.0 / frame_ms)
+                                     : (0.9 * fps_ema + 0.1 * (1000.0 / frame_ms));
+          fprintf(stderr, "\r  FPS: %5.1f  Latency: %4.0f ms  Subjects: %d   ",
+                  fps_ema, latency_ms, (int)results.size());
+          fflush(stderr);
+        }
 
         // Save and exit if --save was given, or after one frame for static images
         if (!save_path.empty()) {
