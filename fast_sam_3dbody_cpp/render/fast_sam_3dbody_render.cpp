@@ -361,6 +361,11 @@ int main(int argc, const char** argv) {
     bool use_trt      = false;
     bool fp16         = true;
     bool zero_face    = true;
+    int    render_w   = 0;   // GL window width  (0 = match input)
+    int    render_h   = 0;   // GL window height (0 = match input)
+    int    cap_w      = 0;   // capture width  (0 = driver default)
+    int    cap_h      = 0;   // capture height (0 = driver default)
+    double cap_fps    = 0.0; // capture fps    (0 = driver default)
 
     for (int i = 1; i < argc; ++i) {
 #define A1(flag, field, conv) \
@@ -374,6 +379,12 @@ int main(int argc, const char** argv) {
         A1("--save",     save_path, std::string)
         A1("--cuda",     cuda_device, std::stoi)
 #undef A1
+        if (!strcmp(argv[i], "--render-size") && i+2 < argc)
+            { render_w = std::stoi(argv[++i]); render_h = std::stoi(argv[++i]); continue; }
+        if (!strcmp(argv[i], "--size") && i+2 < argc)
+            { cap_w = std::stoi(argv[++i]); cap_h = std::stoi(argv[++i]); continue; }
+        if (!strcmp(argv[i], "--fps") && i+1 < argc)
+            { cap_fps = std::stod(argv[++i]); continue; }
         if (!strcmp(argv[i], "--trt"))       { use_trt    = true;  continue; }
         if (!strcmp(argv[i], "--no-fp16"))   { fp16       = false; continue; }
         if (!strcmp(argv[i], "--dev-face"))  { zero_face  = false; continue; }
@@ -413,6 +424,11 @@ int main(int argc, const char** argv) {
                 if (!cap.isOpened()) { fprintf(stderr,"Cannot open: %s\n", src.c_str()); return 1; }
             }
         }
+        if (!is_image && cap.isOpened()) {
+            if (cap_w > 0) cap.set(cv::CAP_PROP_FRAME_WIDTH,  cap_w);
+            if (cap_h > 0) cap.set(cv::CAP_PROP_FRAME_HEIGHT, cap_h);
+            if (cap_fps > 0.0) cap.set(cv::CAP_PROP_FPS,      cap_fps);
+        }
     }
 
     // Determine initial window size from first frame
@@ -420,7 +436,10 @@ int main(int argc, const char** argv) {
     if (is_image) probe = static_img;
     else          cap >> probe;
     if (probe.empty()) { fprintf(stderr, "Empty frame\n"); return 1; }
-    int W = probe.cols, H = probe.rows;
+    int frame_w = probe.cols;   // input frame dims — used for projection matrix
+    int frame_h = probe.rows;
+    int W = (render_w > 0) ? render_w : frame_w;
+    int H = (render_h > 0) ? render_h : frame_h;
 
     // ── GLX window ────────────────────────────────────────────────────────────
     if (!start_glx3_stuff(W, H, 1, argc, argv)) {
@@ -607,7 +626,7 @@ int main(int argc, const char** argv) {
             float proj[16], view[16], mvp[16];
             mhr_camera_matrices(proj, view,
                                 r.focal_length, r.pred_cam_t.data(),
-                                W, H);
+                                frame_w, frame_h);
 
 
             //view[0]=1.0; view[1]=0.0; view[2]=0.0; view[3]=0.0;

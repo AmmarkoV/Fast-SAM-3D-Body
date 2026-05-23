@@ -37,6 +37,11 @@ struct Config
     float       cy             = 0.f;
     bool        headless    = false;
     bool        info_only   = false;
+    int         render_w    = 0;     // GL window width  (0 = match input)
+    int         render_h    = 0;     // GL window height (0 = match input)
+    int         cap_w       = 0;     // capture width  (0 = driver default)
+    int         cap_h       = 0;     // capture height (0 = driver default)
+    double      cap_fps     = 0.0;   // capture fps    (0 = driver default)
 };
 
 static void print_usage(const char* prog)
@@ -46,6 +51,8 @@ static void print_usage(const char* prog)
     printf("  --gguf PATH       pipeline.gguf (MHR + camera heads)\n");
     printf("  --yolo PATH       YOLO pose model (.onnx or .engine)\n");
     printf("  --from SRC        Webcam index (0,1,..) or path to image/video\n");
+    printf("  --size W H        Webcam capture resolution (default: driver default)\n");
+    printf("  --fps Z           Webcam capture framerate  (default: driver default)\n");
     printf("  --cuda DEVICE     CUDA device index (default 0; -1 = CPU)\n");
     printf("  --trt             Enable ONNX Runtime TensorRT EP\n");
     printf("  --no-fp16         Disable FP16 for ONNX EP\n");
@@ -57,6 +64,7 @@ static void print_usage(const char* prog)
     printf("  --fy F            Camera focal length y (0 = image width)\n");
     printf("  --cx F            Principal point x (0 = width/2)\n");
     printf("  --cy F            Principal point y (0 = height/2)\n");
+    printf("  --render-size W H GL window width and height in pixels (default: match input)\n");
     printf("  --headless        Do not open display windows\n");
     printf("  --info            Print pipeline info and exit\n");
     printf("  --help / -h       This message\n");
@@ -81,6 +89,23 @@ static Config parse_args(int argc, char** argv)
         ARG1("--cx",       cx,          std::stof)
         ARG1("--cy",       cy,          std::stof)
 #undef ARG1
+        if (!strcmp(argv[i], "--render-size") && i+2 < argc)
+        {
+            c.render_w = std::stoi(argv[++i]);
+            c.render_h = std::stoi(argv[++i]);
+            continue;
+        }
+        if (!strcmp(argv[i], "--size") && i+2 < argc)
+        {
+            c.cap_w = std::stoi(argv[++i]);
+            c.cap_h = std::stoi(argv[++i]);
+            continue;
+        }
+        if (!strcmp(argv[i], "--fps") && i+1 < argc)
+        {
+            c.cap_fps = std::stod(argv[++i]);
+            continue;
+        }
         if (!strcmp(argv[i], "--trt"))
         {
             c.use_trt   = true;
@@ -225,6 +250,13 @@ int main(int argc, char** argv)
             }
         }
         if (!is_image) cap.open(c.input_src);
+    }
+
+    if (!is_image && cap.isOpened())
+    {
+        if (c.cap_w > 0) cap.set(cv::CAP_PROP_FRAME_WIDTH,  c.cap_w);
+        if (c.cap_h > 0) cap.set(cv::CAP_PROP_FRAME_HEIGHT, c.cap_h);
+        if (c.cap_fps > 0.0) cap.set(cv::CAP_PROP_FPS,      c.cap_fps);
     }
 
     if (!is_image && !cap.isOpened())
