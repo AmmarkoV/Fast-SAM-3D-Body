@@ -69,6 +69,11 @@ typedef struct {
     // ctypes struct layout for older code is not disturbed.
     float pred_pose_raw[266];  // global_rot_6d[6] + body_cont[260]
     float pred_cam_raw[3];     // raw cam head output before s/tx/ty decode
+
+    // Assembled model_params[204] used by native C LBS (hand + scale already decoded).
+    // Layout: [0:3]=global_trans*10, [3:6]=global_rot ZYX, [6:136]=body_pose[:130],
+    //         [136:204]=scale_out.  Mirrors Python mhr_forward(..., return_model_params=True).
+    float mhr_model_params[204];
 } FsbResult;
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────

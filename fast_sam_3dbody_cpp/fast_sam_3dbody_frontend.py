@@ -69,6 +69,10 @@ class FsbResult(ctypes.Structure):
         # HIGH RISK: any offset here shifts ALL ctypes reads for this struct.
         ("pred_pose_raw", ctypes.c_float * 266),
         ("pred_cam_raw",  ctypes.c_float * 3),
+        # mhr_model_params[204]: assembled model_params used by native C LBS.
+        # Layout: [0:3]=global_trans*10, [3:6]=global_rot ZYX, [6:136]=body_pose[:130],
+        #         [136:204]=scale_out.  Mirrors Python mhr_forward(return_model_params=True).
+        ("mhr_model_params", ctypes.c_float * 204),
     ]
 
 

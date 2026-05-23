@@ -357,6 +357,157 @@ def phase_c(frame_bgr):
     print(f"  max    |Δ| (all 70 joints): {dist.max():.1f} px")
 
 
+# ─── Phase E: model_params[204] transform parity ────────────────────────────
+#
+# Given the SAME pred_pose_raw (C++ ONNX output), verify that:
+#   C++  build_model_params + apply_hand_pose + scale_decode → model_params[204]
+# matches:
+#   Py   mhr_forward(..., return_model_params=True)            → model_params[204]
+#
+# This tests the full 3D transform chain:
+#   pred_pose_raw[266]
+#     → rot6d_to_euler    (C++)  /  rotmat_to_euler_ZYX        (Python)  → global_rot
+#     → compact_cont_to_body_params (C++) / compact_cont_to_model_params_body_fast (Py) → body_euler
+#     → build_model_params[204]  /  mhr_forward model_params[204]
+#     → apply_hand_pose / replace_hands_in_pose
+#     → scale PCA decode
+#
+# If model_params agree → code is correct; arm issue is pure model quality (Phase D).
+# If model_params disagree → code bug somewhere in the transform chain.
+
+def phase_e(frame_bgr):
+    print("\n" + "="*70)
+    print("PHASE E — model_params[204] transform parity (same pred_pose_raw)")
+    print("  Goal: verify build_model_params + hand/scale decode matches Python")
+    print("="*70)
+
+    # ── C++ pass ──────────────────────────────────────────────────────────────
+    print("\n[1/3] Running C++ pipeline...")
+    lib, h, FsbResult = _load_cpp()
+    results = _run_cpp(lib, h, FsbResult, frame_bgr)
+    lib.fsb_destroy(h)
+
+    if not results:
+        print("  No C++ detections — supply an image with a visible person")
+        return
+
+    r = results[0]
+    cpp_mp       = np.array(r.mhr_model_params, dtype=np.float32)  # [204]
+    cpp_pose_raw = np.array(r.pred_pose_raw,    dtype=np.float32)  # [266]
+    cpp_shape    = np.array(r.shape,            dtype=np.float32)  # [45]
+    cpp_scale    = np.array(r.scale,            dtype=np.float32)  # [28]
+    cpp_hand     = np.array(r.hand_pose,        dtype=np.float32)  # [108]
+
+    print(f"  C++ mhr_model_params[0:6]: {cpp_mp[:6].round(4)}")
+    print(f"  C++ mhr_model_params[3:6] (global_rot ZYX): {cpp_mp[3:6].round(4)}")
+    print(f"  C++ mhr_model_params[6:12] (body_pose first joint): {cpp_mp[6:12].round(4)}")
+    print(f"  C++ scale sum: {cpp_scale.sum():.4f}  hand norm: {np.linalg.norm(cpp_hand):.4f}")
+
+    # ── Python model_params via mhr_forward ───────────────────────────────────
+    print("\n[2/3] Loading Python model, computing model_params from same pred_pose_raw...")
+    model, _, device = _load_python_model()
+    py_glob, py_body = _pred_pose_raw_to_euler(cpp_pose_raw, model, device)
+
+    import torch
+    head = model.head_pose
+    def T(arr, dtype=torch.float32):
+        return torch.tensor(arr, dtype=dtype, device=device).unsqueeze(0)
+
+    with torch.no_grad():
+        out = head.mhr_forward(
+            global_trans      = torch.zeros(1, 3, device=device),
+            global_rot        = T(py_glob),        # [1,3] ZYX: [rz,ry,rx]
+            body_pose_params  = T(py_body),        # [1,133]
+            hand_pose_params  = T(cpp_hand),       # [1,108]
+            scale_params      = T(cpp_scale),      # [1,28]
+            shape_params      = T(cpp_shape),      # [1,45]
+            expr_params       = torch.zeros(1, 72, device=device),
+            return_keypoints  = False,
+            return_model_params = True,
+        )
+
+    # mhr_forward returns: (verts, model_params) when return_model_params=True,
+    # return_keypoints=False — check the actual tuple length
+    if isinstance(out, (tuple, list)):
+        # find the [1,204] model_params tensor
+        py_mp_t = None
+        for t in out:
+            if isinstance(t, torch.Tensor) and t.shape[-1] == 204:
+                py_mp_t = t
+                break
+        if py_mp_t is None:
+            print(f"  Could not locate model_params in mhr_forward output (shapes: {[tuple(t.shape) for t in out if isinstance(t,torch.Tensor)]})")
+            return
+    else:
+        py_mp_t = out
+
+    py_mp = py_mp_t[0].detach().cpu().numpy().astype(np.float32)   # [204]
+    print(f"  Py  mhr_model_params[3:6] (global_rot ZYX): {py_mp[3:6].round(4)}")
+    print(f"  Py  mhr_model_params[6:12] (body_pose first joint): {py_mp[6:12].round(4)}")
+
+    # ── Compare ───────────────────────────────────────────────────────────────
+    print("\n[3/3] Comparing model_params[204] element by element...")
+    diff = py_mp - cpp_mp
+    adiff = np.abs(diff)
+
+    print(f"\n--- model_params[204] summary ---")
+    print(f"  median |Δ|: {np.median(adiff):.6f}")
+    print(f"  mean   |Δ|: {adiff.mean():.6f}")
+    print(f"  max    |Δ|: {adiff.max():.6f}  (idx {adiff.argmax()})")
+    top5 = np.argsort(adiff)[-5:][::-1]
+    print(f"  top-5 worst: {list(zip(top5.tolist(), adiff[top5].round(6).tolist()))}")
+
+    # Per-region breakdown matching the layout:
+    #   [0:3]   global_trans * 10  (should be 0)
+    #   [3:6]   global_rot ZYX [rz, ry, rx]
+    #   [6:68]  body_pose non-hand DOFs (indices 0-61 of body_pose_euler)
+    #   [68:122] hand DOFs (replaced by apply_hand_pose / replace_hands_in_pose)
+    #   [122:136] remaining body DOFs (body_pose_euler[116:130])
+    #   [136:204] scale params (68 floats from PCA decode)
+    regions = [
+        ("global_trans*10  [0:3]",   0,   3),
+        ("global_rot ZYX   [3:6]",   3,   6),
+        ("body_pose head   [6:68]",  6,  68),
+        ("hand joints      [68:122]", 68, 122),
+        ("body_pose tail   [122:136]", 122, 136),
+        ("scale PCA        [136:204]", 136, 204),
+    ]
+    print(f"\n--- Region breakdown ---")
+    for name, lo, hi in regions:
+        r_diff = adiff[lo:hi]
+        print(f"  {name}: mean={r_diff.mean():.5f}  max={r_diff.max():.5f}")
+        if r_diff.max() > 1e-3:
+            worst_off = lo + r_diff.argmax()
+            print(f"    worst at [{worst_off}]: cpp={cpp_mp[worst_off]:.6f}  py={py_mp[worst_off]:.6f}  Δ={diff[worst_off]:+.6f}")
+
+    # Print specific significant differences
+    sig = np.where(adiff > 0.001)[0]
+    if len(sig) > 0:
+        print(f"\n--- Indices with |Δ| > 0.001 ({len(sig)} total) ---")
+        for idx in sig[:20]:
+            region = next((n for n, lo, hi in regions if lo <= idx < hi), "?")
+            print(f"  [{idx:3d}] ({region}): cpp={cpp_mp[idx]:.6f}  py={py_mp[idx]:.6f}  Δ={diff[idx]:+.6f}")
+        if len(sig) > 20:
+            print(f"  ... ({len(sig)-20} more)")
+
+    # ── Verdict ───────────────────────────────────────────────────────────────
+    print(f"\n--- Verdict ---")
+    body_max = adiff[3:136].max()
+    scale_max = adiff[136:204].max()
+    if body_max < 1e-4 and scale_max < 1e-3:
+        print("  PASS: model_params matches Python within numerical precision.")
+        print("  → build_model_params + hand/scale decode are correct.")
+        print("  → Arm issue is ONLY due to FP32 vs BF16 body_cont quality (Phase D).")
+    elif body_max < 0.01:
+        print(f"  WARN: small body_pose/global_rot discrepancies (max {body_max:.5f} rad).")
+        print("  → Likely floating-point rounding. Check the highlighted indices.")
+    else:
+        print(f"  FAIL: significant model_params mismatch (body max {body_max:.5f})!")
+        print("  → Code bug in build_model_params, apply_hand_pose, or scale decode.")
+
+    return cpp_mp, py_mp
+
+
 # ─── Phase D: pred_pose_raw comparison (ONNX vs PyTorch) ─────────────────────
 #
 # This phase answers: "Is the arm bending a code bug or a model quality issue?"
@@ -515,7 +666,7 @@ def phase_d(frame_bgr):
 
 def main():
     ap = argparse.ArgumentParser(description="Systematic C++/Python parity tests")
-    ap.add_argument("--phase", choices=["A", "B", "C", "D", "all"], default="all")
+    ap.add_argument("--phase", choices=["A", "B", "C", "D", "E", "all"], default="all")
     ap.add_argument("--image", default="",
                     help="Path to test image (uses grey frame if not set)")
     args = ap.parse_args()
@@ -548,6 +699,9 @@ def main():
 
     if args.phase in ("C", "all"):
         run(phase_c, frame)
+
+    if args.phase in ("E", "all"):
+        run(phase_e, frame)
 
     if args.phase in ("D", "all"):
         run(phase_d, frame)

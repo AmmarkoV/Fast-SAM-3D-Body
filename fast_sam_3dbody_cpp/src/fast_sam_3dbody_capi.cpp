@@ -104,6 +104,9 @@ extern "C" {
             std::memcpy(out.pred_pose_raw, r.pred_pose_raw.data(), 266 * sizeof(float));
             // pred_cam_raw[3]: raw cam FFN output before s/tx/ty → pred_cam_t.
             std::memcpy(out.pred_cam_raw,  r.pred_cam_raw.data(),  3   * sizeof(float));
+
+            // mhr_model_params[204]: assembled model_params with hand + scale decoded.
+            std::memcpy(out.mhr_model_params, r.mhr_model_params.data(), 204 * sizeof(float));
         }
         return n;
     }
