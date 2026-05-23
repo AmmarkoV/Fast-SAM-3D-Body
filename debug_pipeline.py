@@ -497,7 +497,7 @@ def phase_e(frame_bgr):
     if body_max < 1e-4 and scale_max < 1e-3:
         print("  PASS: model_params matches Python within numerical precision.")
         print("  → build_model_params + hand/scale decode are correct.")
-        print("  → Arm issue is ONLY due to FP32 vs BF16 body_cont quality (Phase D).")
+        print("  → Arm issue is NOT from build_model_params; run Phase D to check pose quality.")
     elif body_max < 0.01:
         print(f"  WARN: small body_pose/global_rot discrepancies (max {body_max:.5f} rad).")
         print("  → Likely floating-point rounding. Check the highlighted indices.")
@@ -513,14 +513,15 @@ def phase_e(frame_bgr):
 # This phase answers: "Is the arm bending a code bug or a model quality issue?"
 #
 # Strategy:
-#   1. C++ pipeline (ONNX FP16) → r.pred_pose_raw[266], r.body_pose[133], r.bbox
+#   1. C++ pipeline (ONNX BF16 + GGUF) → r.pred_pose_raw[266], r.body_pose[133], r.bbox
 #   2. Python pipeline (PyTorch BF16) with the SAME bbox → pred_pose_raw[266], body_pose[133]
 #   3. Compare body_cont section (pred_pose_raw[6:266]) and body_pose[133]
 #      element-by-element to isolate which joints drive the difference.
 #
 # If the body_pose arrays differ significantly, the models produce different
-# pose estimates → quality/model issue.  If they agree but the render still
-# looks wrong, look for a code bug in build_model_params or mhr_lbs_compute.
+# pose estimates → check GGUF export (init_pose/init_camera residuals must be baked in).
+# If they agree but the render still looks wrong, look for a code bug in
+# build_model_params or mhr_lbs_compute.
 
 def phase_d(frame_bgr):
     print("\n" + "="*70)
@@ -634,32 +635,29 @@ def phase_d(frame_bgr):
         print(f"  |Δ|: {np.abs(py_glob - cpp_glob).round(4)}")
 
     # ── verdict ───────────────────────────────────────────────────────────────
-    # Root cause: backbone.onnx was exported with .float() (FP32) but the model
-    # was trained with compute_dtype=bfloat16.  The FP32 ONNX backbone produces
-    # slightly different image tokens than Python BF16, which propagates through
-    # the decoder FFN and manifests as direction errors in the 6D rotation vectors
-    # for certain body joints (especially 1-DOF joints at indices 27-58).
-    #
-    # Fix 1 (recommended): Use two_pass.py — C++ for detection, Python BF16 for
-    #         body estimation.  Already implemented in fast_sam_3dbody_frontend.py.
-    # Fix 2 (pure C++): Re-export ONNX in BF16 to match training precision:
-    #         python fast_sam_3dbody_cpp/export_onnx.py --bf16 --stage backbone
-    #         python fast_sam_3dbody_cpp/export_onnx.py --bf16 --stage decoder
-    #         (Requires Ampere+ GPU and ORT 1.16+)
+    # Root cause history:
+    #   - Original issue: C++ GGUF FFN was running cffn_run(x) without the
+    #     init_pose/init_camera residual.  head_pose.forward computes
+    #     pred = proj(x) + init_pose.weight, head_camera similarly.  The C++
+    #     code was missing the "+ init_*" term, causing a systematic ~1.0 offset
+    #     in body_cont elements 0 and 4 for every 3-DOF joint.
+    #   - Fix: bake init_pose.weight into mhr_proj.fc1.bias and
+    #     init_camera.weight into cam_proj.fc1.bias in convertModelToGGUF.py.
+    #     After the fix, Phase D reports ~1.8° mean arm/torso diff (AGREE).
     mean_body_diff_deg = np.degrees(body_diff[:62].mean())
     print(f"\n--- Verdict ---")
     print(f"  Mean arm/torso body_pose diff: {mean_body_diff_deg:.1f} deg")
     if mean_body_diff_deg < 5.0:
         print("  AGREE: ONNX and PyTorch produce similar body_pose.")
-        print("  → Arm issue is NOT a precision mismatch; check build_model_params / render code.")
+        print("  → Arm issue is NOT a pose-quality mismatch; check build_model_params / render code.")
     elif mean_body_diff_deg < 20.0:
-        print("  PARTIAL: FP32 ONNX vs BF16 PyTorch causes moderate body_pose differences.")
-        print("  → Root cause: backbone.onnx exported in FP32 but model trained with BF16.")
-        print("  → Fix: use --two-passes (frontend) or re-export with: export_onnx.py --bf16")
+        print("  PARTIAL: moderate body_pose differences between C++ and Python.")
+        print("  → Check pipeline.gguf was exported with init_pose/init_camera residuals baked in.")
+        print("  → Re-export with: python fast_sam_3dbody_cpp/convertModelToGGUF.py")
     else:
-        print("  DISAGREE: FP32 ONNX vs BF16 PyTorch causes large body_pose differences.")
-        print("  → Root cause: backbone.onnx exported in FP32 but model trained with BF16.")
-        print("  → Fix: use --two-passes (frontend) or re-export with: export_onnx.py --bf16")
+        print("  DISAGREE: large body_pose differences between C++ and Python.")
+        print("  → Check pipeline.gguf was exported with init_pose/init_camera residuals baked in.")
+        print("  → Re-export with: python fast_sam_3dbody_cpp/convertModelToGGUF.py")
 
 
 # ─── entry point ──────────────────────────────────────────────────────────────

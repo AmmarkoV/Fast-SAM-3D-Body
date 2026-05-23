@@ -454,8 +454,8 @@ def parse_args():
                    help="Write visualised output to this file (image or video)")
     p.add_argument("--skip-body",   action="store_true",
                    help="Skip body model (faster, no hand/foot keypoints)")
-    p.add_argument("--zero-face",   action="store_true",
-                   help="Force face expression params to zero (neutral face, for debugging)")
+    p.add_argument("--dev-face",    action="store_true",
+                   help="Enable face expression params (disabled by default; use for dev/debug)")
     p.add_argument("--visualize-yolo", action="store_true",
                    help="Overlay YOLO COCO 17-point skeleton (off by default)")
     # ── Second-pass options ───────────────────────────────────────────────────
@@ -496,7 +496,7 @@ def main():
         focal_y          = args.fy,
         principal_x      = args.cx,
         principal_y      = args.cy,
-        zero_face_params = 1 if args.zero_face else 0,
+        zero_face_params = 0 if args.dev_face else 1,
     )
 
     print("Loading pipeline …")

@@ -360,7 +360,7 @@ int main(int argc, const char** argv) {
     int  cuda_device  = 0;
     bool use_trt      = false;
     bool fp16         = true;
-    bool zero_face    = false;
+    bool zero_face    = true;
 
     for (int i = 1; i < argc; ++i) {
 #define A1(flag, field, conv) \
@@ -376,7 +376,7 @@ int main(int argc, const char** argv) {
 #undef A1
         if (!strcmp(argv[i], "--trt"))       { use_trt    = true;  continue; }
         if (!strcmp(argv[i], "--no-fp16"))   { fp16       = false; continue; }
-        if (!strcmp(argv[i], "--zero-face")) { zero_face  = true;  continue; }
+        if (!strcmp(argv[i], "--dev-face"))  { zero_face  = false; continue; }
     }
 
     // ── Pipeline ─────────────────────────────────────────────────────────────

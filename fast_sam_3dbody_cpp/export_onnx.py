@@ -66,8 +66,56 @@ class BackboneWrapper(nn.Module):
         )[-1]
 
 
+class _Float32Conv(nn.Module):
+    """Wraps a Conv module to run in float32 even inside torch.autocast(bfloat16).
+
+    ORT CUDA EP does not support bfloat16 Conv (ONNX opset 18/20 type constraint).
+    Parameters are upcasted to float32 so the ONNX graph contains a float32 Conv
+    node surrounded by explicit Cast nodes, while downstream attention ops remain
+    in bfloat16 via the outer autocast context.
+    """
+    def __init__(self, conv: nn.Module):
+        super().__init__()
+        self.conv = conv.float()  # upcast params: Conv node will be float32 in ONNX
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.autocast("cuda", enabled=False):
+            return self.conv(x.float()).to(x.dtype)
+
+
+def _patch_swiglu_silu_float32(encoder: nn.Module) -> None:
+    """Force SwiGLU FFN blocks to compute silu in float32 during BF16 export.
+
+    ORT CUDA EP's com.microsoft.QuickGelu kernel only supports float32.
+    With BF16 autocast, silu(x) = x * sigmoid(x) becomes BF16 Mul+Sigmoid which
+    ORT fuses as QuickGelu(BF16) — missing kernel.
+    By running silu in float32 we get QuickGelu(float32) which ORT does support.
+    Attention linears remain BF16 via the outer autocast context.
+    """
+    import torch.nn.functional as F_
+
+    def _make_f32_silu_forward(m):
+        def forward(x):
+            x1 = m.w1(x)
+            x2 = m.w2(x)
+            with torch.autocast("cuda", enabled=False):
+                hidden = F_.silu(x1.float()) * x2.float()
+            return m.w3(hidden.to(x.dtype))
+        return forward
+
+    for module in encoder.modules():
+        if hasattr(module, "w1") and hasattr(module, "w2") and hasattr(module, "w3"):
+            module.forward = _make_f32_silu_forward(module)
+
+
 def _patch_encoder(encoder):
-    """Patch prepare_tokens_with_masks to avoid mask_token graph edge."""
+    """Patch prepare_tokens_with_masks to avoid mask_token graph edge.
+    Also wraps patch_embed in _Float32Conv (ORT CUDA EP rejects BF16 Conv in opset 18/20).
+    Patches SwiGLU silu to float32 (ORT has no BF16 QuickGelu kernel, float32 is supported).
+    """
+    encoder.patch_embed = _Float32Conv(encoder.patch_embed)
+    _patch_swiglu_silu_float32(encoder)
+
     def _prepare_tokens_patched(self, x, masks=None):
         x = self.patch_embed(x)
         B, H, W, _ = x.shape
@@ -136,6 +184,12 @@ class BodyDecoderWrapper(nn.Module):
             if isinstance(m, nn.GELU):
                 m.approximate = "tanh"  # use tanh approximation which exports cleanly
 
+        # With --bf16 export, torch.autocast handles BF16 for linear ops.
+        # Wrap ray_cond_emb.conv in _Float32Conv so it stays float32 in the ONNX
+        # graph (ORT CUDA EP rejects bfloat16 Conv in opset 18/20).
+        self.ray_cond_emb.conv = _Float32Conv(self.ray_cond_emb.conv)
+        # prompt_encoder has internal float32 casts; autocast leaves those in float32.
+
     def forward(
         self,
         features:  torch.Tensor,   # [B, 1280, 32, 32]
@@ -172,10 +226,13 @@ class BodyDecoderWrapper(nn.Module):
         prev_emb  = self.prev_to_token(init_est)            # [B,1,1024]
 
         # ── dummy keypoint prompt (label=-2 encodes "no keypoints") ──────
-        kps = torch.full((B, 1, 3), 0.0, device=dev, dtype=dtype)
+        # prompt_encoder uses sin/cos positional encoding; ONNX Cos/Sin don't support
+        # bfloat16, so force float32 here and cast the result back to the active dtype.
+        kps = torch.full((B, 1, 3), 0.0, device=dev, dtype=torch.float32)
         kps[:, :, -1] = -2.0
-        prompt_emb, _ = self.prompt_encoder(keypoints=kps)  # [B,1,backbone_dim]
-        prompt_emb    = self.prompt_to_token(prompt_emb)    # [B,1,1024]
+        with torch.autocast("cuda", enabled=False):
+            prompt_emb, _ = self.prompt_encoder(keypoints=kps)  # [B,1,backbone_dim] float32
+        prompt_emb    = self.prompt_to_token(prompt_emb.to(dtype))    # [B,1,1024]
 
         # ── token sequence + augment (positional info per token) ─────────
         token_seq = torch.cat([token_seq, prev_emb, prompt_emb], dim=1)   # [B,3,1024]
@@ -190,8 +247,10 @@ class BodyDecoderWrapper(nn.Module):
                 tok_aug   = torch.cat([tok_aug,   torch.zeros_like(emb)], dim=1)
 
         # ── image positional encoding ─────────────────────────────────────
-        img_pe = self.prompt_encoder.get_dense_pe(features.shape[-2:])    # [1,C,h,w]
-        img_pe = img_pe.expand(B, -1, -1, -1)                             # [B,C,h,w]
+        # get_dense_pe also uses sin/cos; same float32 guard.
+        with torch.autocast("cuda", enabled=False):
+            img_pe = self.prompt_encoder.get_dense_pe(features.shape[-2:])    # float32 [1,C,h,w]
+        img_pe = img_pe.to(dtype).expand(B, -1, -1, -1)                       # [B,C,h,w]
 
         # ── run decoder ───────────────────────────────────────────────────
         out = self.decoder(
@@ -248,9 +307,9 @@ def _simplify(path: str):
         model = onnx.load(path)
         try:
             model_sim, ok = onnxsim.simplify(model)
-        except RuntimeError:
-            # onnxsim C extension bug with ir_version — skip
-            print(f"  [onnxsim] C simplify skipped for {os.path.basename(path)}")
+        except (RuntimeError, Exception):
+            # onnxsim can't handle BF16 graphs or some ir_version quirks — skip
+            print(f"  [onnxsim] simplify skipped for {os.path.basename(path)}")
             return
         if ok:
             onnx.save(model_sim, path)
@@ -263,70 +322,72 @@ def _simplify(path: str):
 
 def export_backbone(model, out_dir: str, opset: int = 18, bf16: bool = False):
     path = os.path.join(out_dir, "backbone.onnx")
-    print(f"\n── backbone → {path}  (dtype={'bfloat16' if bf16 else 'float32'})")
-
-    # The model was trained with BF16 compute (compute_dtype: torch.bfloat16).
-    # Exporting in BF16 matches the training regime and avoids the FP32 vs BF16
-    # precision mismatch that causes arm joint estimation errors in C++ inference.
-    dtype = torch.bfloat16 if bf16 else torch.float32
+    print(f"\n── backbone → {path}  ({'autocast bfloat16' if bf16 else 'float32'})")
 
     encoder = model.backbone.encoder
     _patch_encoder(encoder)
     wrapper = BackboneWrapper(encoder)
-    wrapper.eval().to(dtype).cuda()
+    wrapper.eval().cuda()  # parameters stay float32; autocast handles BF16 compute
 
-    dummy = torch.randn(1, 3, IMAGE_SIZE, IMAGE_SIZE, device="cuda", dtype=dtype)
-    with torch.no_grad():
+    dummy = torch.randn(1, 3, IMAGE_SIZE, IMAGE_SIZE, device="cuda", dtype=torch.float32)
+
+    import contextlib
+    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if bf16 else contextlib.nullcontext()
+
+    with ctx, torch.no_grad():
         out = wrapper(dummy)
-    print(f"   in {tuple(dummy.shape)}  out {tuple(out.shape)}  dtype={out.dtype}")
+    print(f"   in {tuple(dummy.shape)}  out {tuple(out.shape)}  output dtype={out.dtype}")
 
-    torch.onnx.export(
-        wrapper, dummy, path,
-        input_names=["image"],
-        output_names=["features"],
-        dynamic_axes={"image": {0: "B"}, "features": {0: "B"}},
-        opset_version=opset,
-        do_constant_folding=True,
-        dynamo=False,
-    )
+    with ctx:
+        torch.onnx.export(
+            wrapper, dummy, path,
+            input_names=["image"],
+            output_names=["features"],
+            dynamic_axes={"image": {0: "B"}, "features": {0: "B"}},
+            opset_version=opset,
+            do_constant_folding=True,
+            dynamo=False,
+        )
     print(f"   {os.path.getsize(path)/1e6:.1f} MB  ✓")
     _simplify(path)
 
 
 def export_decoder(model, out_dir: str, opset: int = 18, bf16: bool = False):
     path = os.path.join(out_dir, "decoder.onnx")
-    print(f"\n── decoder → {path}  (dtype={'bfloat16' if bf16 else 'float32'})")
-
-    dtype = torch.bfloat16 if bf16 else torch.float32
+    print(f"\n── decoder → {path}  ({'autocast bfloat16' if bf16 else 'float32'})")
 
     wrapper = BodyDecoderWrapper(model)
-    wrapper.eval().to(dtype).cuda()
+    wrapper.eval().cuda()  # parameters stay float32; autocast handles BF16 compute
 
     B = 1
-    feat  = torch.randn(B, BACKBONE_DIM, FEAT_H, FEAT_W, device="cuda", dtype=dtype)
-    cond  = torch.randn(B, 3,            device="cuda", dtype=dtype)
-    ray   = torch.randn(B, 2, FEAT_H,   FEAT_W,  device="cuda", dtype=dtype)
+    feat  = torch.randn(B, BACKBONE_DIM, FEAT_H, FEAT_W, device="cuda", dtype=torch.float32)
+    cond  = torch.randn(B, 3,            device="cuda", dtype=torch.float32)
+    ray   = torch.randn(B, 2, FEAT_H,   FEAT_W,  device="cuda", dtype=torch.float32)
 
-    with torch.no_grad():
+    import contextlib
+    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if bf16 else contextlib.nullcontext()
+
+    with ctx, torch.no_grad():
         token = wrapper(feat, cond, ray)
-    print(f"   pose_token shape: {tuple(token.shape)}  dtype={token.dtype}")
+    print(f"   pose_token shape: {tuple(token.shape)}  output dtype={token.dtype}")
 
-    torch.onnx.export(
-        wrapper,
-        (feat, cond, ray),
-        path,
-        input_names =["features", "condition_info", "ray_cond"],
-        output_names=["pose_token"],
-        dynamic_axes={
-            "features":       {0: "B"},
-            "condition_info": {0: "B"},
-            "ray_cond":       {0: "B"},
-            "pose_token":     {0: "B"},
-        },
-        opset_version=opset,
-        do_constant_folding=True,
-        dynamo=False,
-    )
+    with ctx:
+        torch.onnx.export(
+            wrapper,
+            (feat, cond, ray),
+            path,
+            input_names =["features", "condition_info", "ray_cond"],
+            output_names=["pose_token"],
+            dynamic_axes={
+                "features":       {0: "B"},
+                "condition_info": {0: "B"},
+                "ray_cond":       {0: "B"},
+                "pose_token":     {0: "B"},
+            },
+            opset_version=opset,
+            do_constant_folding=True,
+            dynamo=False,
+        )
     print(f"   {os.path.getsize(path)/1e6:.1f} MB  ✓")
     _simplify(path)
 

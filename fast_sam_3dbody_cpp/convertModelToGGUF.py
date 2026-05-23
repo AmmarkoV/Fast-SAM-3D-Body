@@ -98,6 +98,23 @@ def convert(checkpoint_dir: str, output_path: str, dtype_str: str = "f16"):
     if not tensors:
         raise RuntimeError("No tensors found — check model attribute names")
 
+    # ── bake residual init embeddings into fc1.bias ───────────────────────
+    # head_pose.forward: pred = proj(x) + init_pose.weight   (residual skip)
+    # head_camera.forward: pred = proj(x) + init_camera.weight
+    # The C++ cffn_run has no such skip, so we fold init_* into the fc1.bias.
+    init_pose_np   = model.init_pose.weight[0].detach().cpu().numpy().astype(np.float32)
+    init_camera_np = model.init_camera.weight[0].detach().cpu().numpy().astype(np.float32)
+    tensors_out = []
+    for name, arr in tensors:
+        if name == "mhr_proj.fc1.bias":
+            arr = arr + init_pose_np
+            print(f"  [init_pose residual baked into {name}]")
+        elif name == "cam_proj.fc1.bias":
+            arr = arr + init_camera_np
+            print(f"  [init_camera residual baked into {name}]")
+        tensors_out.append((name, arr))
+    tensors = tensors_out
+
     for name, arr in tensors:
         print(f"  {name:40s}  {str(arr.shape):20s}  {arr.dtype}")
 
