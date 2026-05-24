@@ -3,10 +3,12 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/videoio.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/highgui.hpp>
 
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 
 using Clock = std::chrono::steady_clock;
@@ -37,6 +39,7 @@ struct Config
     float       cy             = 0.f;
     bool        headless    = false;
     bool        info_only   = false;
+    std::string csv_path    = "";    // if non-empty, write 3D joints to this CSV
     int         render_w    = 0;     // GL window width  (0 = match input)
     int         render_h    = 0;     // GL window height (0 = match input)
     int         cap_w       = 0;     // capture width  (0 = driver default)
@@ -65,6 +68,7 @@ static void print_usage(const char* prog)
     printf("  --cx F            Principal point x (0 = width/2)\n");
     printf("  --cy F            Principal point y (0 = height/2)\n");
     printf("  --render-size W H GL window width and height in pixels (default: match input)\n");
+    printf("  -o / --out PATH   Write 3D keypoints to CSV (frame,skeleton_id,joint_x,y,z...)\n");
     printf("  --headless        Do not open display windows\n");
     printf("  --info            Print pipeline info and exit\n");
     printf("  --help / -h       This message\n");
@@ -88,6 +92,8 @@ static Config parse_args(int argc, char** argv)
         ARG1("--fy",       focal_y,     std::stof)
         ARG1("--cx",       cx,          std::stof)
         ARG1("--cy",       cy,          std::stof)
+        ARG1("--out",      csv_path,    std::string)
+        ARG1("-o",         csv_path,    std::string)
 #undef ARG1
         if (!strcmp(argv[i], "--render-size") && i+2 < argc)
         {
@@ -181,11 +187,220 @@ static void print_result(int person_idx, const fsb::MHRResult& r)
 }
 
 // ---------------------------------------------------------------------------
+// MHR-70 joint names (matches fast_sam_3dbody_dump_csv.py / MHR70_NAMES)
+// ---------------------------------------------------------------------------
+static const char* KP_NAMES[70] = {
+    "nose",                    //  0
+    "left_eye",                //  1
+    "right_eye",               //  2
+    "left_ear",                //  3
+    "right_ear",               //  4
+    "left_shoulder",           //  5
+    "right_shoulder",          //  6
+    "left_elbow",              //  7
+    "right_elbow",             //  8
+    "left_hip",                //  9
+    "right_hip",               // 10
+    "left_knee",               // 11
+    "right_knee",              // 12
+    "left_ankle",              // 13
+    "right_ankle",             // 14
+    "left_big_toe_tip",        // 15
+    "left_small_toe_tip",      // 16
+    "left_heel",               // 17
+    "right_big_toe_tip",       // 18
+    "right_small_toe_tip",     // 19
+    "right_heel",              // 20
+    "right_thumb_tip",         // 21
+    "right_thumb_first_joint", // 22
+    "right_thumb_second_joint",// 23
+    "right_thumb_third_joint", // 24
+    "right_index_tip",         // 25
+    "right_index_first_joint", // 26
+    "right_index_second_joint",// 27
+    "right_index_third_joint", // 28
+    "right_middle_tip",        // 29
+    "right_middle_first_joint",// 30
+    "right_middle_second_joint",//31
+    "right_middle_third_joint",// 32
+    "right_ring_tip",          // 33
+    "right_ring_first_joint",  // 34
+    "right_ring_second_joint", // 35
+    "right_ring_third_joint",  // 36
+    "right_pinky_tip",         // 37
+    "right_pinky_first_joint", // 38
+    "right_pinky_second_joint",// 39
+    "right_pinky_third_joint", // 40
+    "right_wrist",             // 41
+    "left_thumb_tip",          // 42
+    "left_thumb_first_joint",  // 43
+    "left_thumb_second_joint", // 44
+    "left_thumb_third_joint",  // 45
+    "left_index_tip",          // 46
+    "left_index_first_joint",  // 47
+    "left_index_second_joint", // 48
+    "left_index_third_joint",  // 49
+    "left_middle_tip",         // 50
+    "left_middle_first_joint", // 51
+    "left_middle_second_joint",// 52
+    "left_middle_third_joint", // 53
+    "left_ring_tip",           // 54
+    "left_ring_first_joint",   // 55
+    "left_ring_second_joint",  // 56
+    "left_ring_third_joint",   // 57
+    "left_pinky_tip",          // 58
+    "left_pinky_first_joint",  // 59
+    "left_pinky_second_joint", // 60
+    "left_pinky_third_joint",  // 61
+    "left_wrist",              // 62
+    "left_olecranon",          // 63
+    "right_olecranon",         // 64
+    "left_cubital_fossa",      // 65
+    "right_cubital_fossa",     // 66
+    "left_acromion",           // 67
+    "right_acromion",          // 68
+    "neck",                    // 69
+};
+
+// ---------------------------------------------------------------------------
+// Skeleton edges for 2-D overlay  (MHR-70 joint indices)
+// ---------------------------------------------------------------------------
+// Colour key (by group): body=green, right-hand=blue, left-hand=red
+static const int BODY_EDGES[][2] = {
+    // Head
+    {0,1},{0,2},{1,3},{2,4},
+    // Shoulders
+    {5,6},
+    // Left arm: shoulder→elbow→wrist
+    {5,7},{7,62},
+    // Right arm: shoulder→elbow→wrist
+    {6,8},{8,41},
+    // Torso
+    {5,9},{6,10},{9,10},
+    // Left leg
+    {9,11},{11,13},{13,15},{13,17},
+    // Right leg
+    {10,12},{12,14},{14,18},{14,20},
+    // Neck
+    {5,69},{6,69},
+};
+static const int N_BODY_EDGES = (int)(sizeof(BODY_EDGES)/sizeof(BODY_EDGES[0]));
+
+// Right hand: finger chains root→tip  (wrist = 41)
+static const int RHAND_EDGES[][2] = {
+    {41,24},{24,23},{23,22},{22,21},   // thumb
+    {41,28},{28,27},{27,26},{26,25},   // index
+    {41,32},{32,31},{31,30},{30,29},   // middle
+    {41,36},{36,35},{35,34},{34,33},   // ring
+    {41,40},{40,39},{39,38},{38,37},   // pinky
+};
+static const int N_RHAND_EDGES = (int)(sizeof(RHAND_EDGES)/sizeof(RHAND_EDGES[0]));
+
+// Left hand: finger chains root→tip  (wrist = 62)
+static const int LHAND_EDGES[][2] = {
+    {62,45},{45,44},{44,43},{43,42},
+    {62,49},{49,48},{48,47},{47,46},
+    {62,53},{53,52},{52,51},{51,50},
+    {62,57},{57,56},{56,55},{55,54},
+    {62,61},{61,60},{60,59},{59,58},
+};
+static const int N_LHAND_EDGES = (int)(sizeof(LHAND_EDGES)/sizeof(LHAND_EDGES[0]));
+
+// ---------------------------------------------------------------------------
+// Draw 2-D skeleton overlay on an OpenCV BGR image
+// ---------------------------------------------------------------------------
+static void draw_skeleton_2d(cv::Mat& img, const std::vector<fsb::MHRResult>& results)
+{
+    for (const auto& r : results)
+    {
+        if (r.keypoints_2d.size() < 70*2) continue;
+        const float* kp = r.keypoints_2d.data();
+
+        auto pt = [&](int j) -> cv::Point {
+            return { (int)kp[j*2], (int)kp[j*2+1] };
+        };
+
+        // Body edges — green
+        for (int e = 0; e < N_BODY_EDGES; ++e)
+            cv::line(img, pt(BODY_EDGES[e][0]), pt(BODY_EDGES[e][1]),
+                     cv::Scalar(0,200,0), 2, cv::LINE_AA);
+
+        // Right-hand edges — blue
+        for (int e = 0; e < N_RHAND_EDGES; ++e)
+            cv::line(img, pt(RHAND_EDGES[e][0]), pt(RHAND_EDGES[e][1]),
+                     cv::Scalar(200,80,0), 1, cv::LINE_AA);
+
+        // Left-hand edges — red
+        for (int e = 0; e < N_LHAND_EDGES; ++e)
+            cv::line(img, pt(LHAND_EDGES[e][0]), pt(LHAND_EDGES[e][1]),
+                     cv::Scalar(0,80,200), 1, cv::LINE_AA);
+
+        // Joint dots
+        for (int j = 0; j < 70; ++j)
+        {
+            cv::Scalar col;
+            int r_px;
+            if      (j <= 20)          { col = cv::Scalar(0,255,0);   r_px = 4; } // body
+            else if (j <= 41)          { col = cv::Scalar(255,100,0); r_px = 3; } // right hand
+            else if (j <= 62)          { col = cv::Scalar(0,100,255); r_px = 3; } // left hand
+            else                       { col = cv::Scalar(0,220,220); r_px = 4; } // extra
+            cv::circle(img, pt(j), r_px, col, -1, cv::LINE_AA);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Write CSV header
+// ---------------------------------------------------------------------------
+static void write_csv_header(std::ofstream& f)
+{
+    f << "frame,skeleton_id";
+    for (int j = 0; j < 70; ++j)
+        f << "," << KP_NAMES[j] << "_x," << KP_NAMES[j] << "_y," << KP_NAMES[j] << "_z";
+    f << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Write one row per detected person
+// ---------------------------------------------------------------------------
+static void write_csv_rows(std::ofstream& f, int frame_no,
+                           const std::vector<fsb::MHRResult>& results)
+{
+    for (int i = 0; i < (int)results.size(); ++i)
+    {
+        const auto& r = results[i];
+        if (r.keypoints_3d.size() < 70*3) continue;
+        f << frame_no << "," << i;
+        for (int j = 0; j < 70; ++j)
+            f << "," << r.keypoints_3d[j*3]
+              << "," << r.keypoints_3d[j*3+1]
+              << "," << r.keypoints_3d[j*3+2];
+        f << "\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv)
 {
     Config c = parse_args(argc, argv);
+
+    // -----------------------------------------------------------------------
+    // Optional CSV output
+    // -----------------------------------------------------------------------
+    std::ofstream csv_out;
+    if (!c.csv_path.empty())
+    {
+        csv_out.open(c.csv_path);
+        if (!csv_out)
+        {
+            fprintf(stderr, "[main] Cannot open CSV for writing: %s\n", c.csv_path.c_str());
+            return 1;
+        }
+        write_csv_header(csv_out);
+        printf("[main] Writing 3D keypoints to: %s\n", c.csv_path.c_str());
+    }
 
     fsb::PipelineConfig pcfg;
     pcfg.onnx_dir       = c.onnx_dir;
@@ -301,6 +516,26 @@ int main(int argc, char** argv)
                frame_count, inf_ms, (int)results.size());
         for (int i = 0; i < (int)results.size(); ++i)
             print_result(i, results[i]);
+
+        // CSV
+        if (csv_out.is_open())
+            write_csv_rows(csv_out, frame_count, results);
+
+        // Visualization
+        if (!c.headless)
+        {
+            cv::Mat vis = frame.clone();
+            draw_skeleton_2d(vis, results);
+            // HUD
+            char hud[128];
+            snprintf(hud, sizeof(hud), "frame %d | %.0f ms | %d person(s) | q=quit",
+                     frame_count, inf_ms, (int)results.size());
+            cv::putText(vis, hud, {10, 24},
+                        cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(0,255,255), 2, cv::LINE_AA);
+            cv::imshow("Fast-SAM-3D-Body", vis);
+            int key = cv::waitKey(is_image ? 0 : 1) & 0xFF;
+            if (key == 'q' || key == 27) break;
+        }
 
         if (is_image) break;
 
